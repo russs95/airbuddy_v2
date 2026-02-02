@@ -1,0 +1,17 @@
+# MicroPython bytecode
+*.mpy
+*.pyc
+__pycache__/
+
+# Editor/OS files
+.DS_Store
+Thumbs.db
+*.swp
+
+# Build and packaging
+build/
+dist/
+*.egg-info/
+
+# Local tooling output
+*.log
