@@ -1,3 +1,5 @@
+from micropython import const
+
 width = const(17)
 height = const(24)
 

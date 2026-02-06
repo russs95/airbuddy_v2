@@ -1,1 +1,0 @@
-"""Tiny fonts definition placeholders."""
