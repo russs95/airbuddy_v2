@@ -2,7 +2,7 @@
 #
 # A reusable “thermo bar” UI primitive for SSD1306 framebuf displays.
 #
-# Spec:
+# Default spec:
 #   - Total height: 7px
 #   - 1px border
 #   - 5px inner fill area
@@ -10,24 +10,35 @@
 #   - Inner fill uses checkerboard dithering
 #   - Leading edge of the fill is a solid vertical line
 #
-# Usage:
-#   bar = ThermoBar(oled)                 # oled is your OLED helper (has .oled FrameBuffer)
-#   bar.draw(x=10, y=40, w=108, p=0.65)   # p in [0..1]
-#   oled.oled.show()
+# Upgrades:
+#   - Construct with x/y/width/height (keyword-friendly)
+#   - Draw by progress p (0..1) OR draw by value mapped to a range
+#   - Optional indicator tick (solid vertical line) marking current value
+#   - Optional “breathing” center-fill mode for spinners/uncertainty bars
+#   - Backwards-compatible: draw(x,y,w,p,...) still works
+#
+# Usage examples:
+#   bar = ThermoBar(oled, x=10, y=40, width=108)   # default height=7
+#   bar.draw(p=0.65)                               # uses stored x/y/width
+#   bar.draw_value(value=820, vmin=100, vmax=2000) # maps to p
+#   bar.draw(p=0.5, mode="center")                 # center-expanding fill
+
 
 class ThermoBar:
-    H_TOTAL = 7
-    BORDER = 1
-    INNER_H = 5
-
-    def __init__(self, oled, invert=False):
+    def __init__(self, oled, x=0, y=0, width=100, height=7, invert=False):
         """
         oled: your OLED helper. Must expose FrameBuffer as oled.oled with
               .pixel/.hline/.vline/.rect/.fill_rect
+        x,y,width,height: default geometry for draw()
         invert: if True, swaps colors (useful for inverted themes)
         """
         self.oled = oled
         self.invert = invert
+
+        self.x = int(x)
+        self.y = int(y)
+        self.width = int(width)
+        self.height = int(height)
 
     # ----------------------------
     # Internal framebuffer helpers
@@ -62,13 +73,46 @@ class ThermoBar:
             fb.fill_rect(int(x), int(y), int(w), int(h), self._c(on))
 
     # ----------------------------
-    # Rounded outline (7px high, 2px-radius look)
+    # Geometry helpers
+    # ----------------------------
+    def _clamp(self, v, lo, hi):
+        if v < lo:
+            return lo
+        if v > hi:
+            return hi
+        return v
+
+    def _inner_geom(self, x, y, w, h):
+        """
+        Inner geometry:
+          - 1px border top/bottom => inner band is y+1 .. y+h-2
+          - 2px horizontal inset => inner_x = x+2 ; inner_w = w-4
+        """
+        # keep minimums sane
+        if h < 7:
+            h = 7
+        if w < 10:
+            w = 10
+
+        inner_y = y + 1
+        inner_h = h - 2  # should be 5 when h=7
+
+        inner_x = x + 2
+        inner_w = w - 4
+
+        if inner_w < 1:
+            inner_w = 1
+        if inner_h < 1:
+            inner_h = 1
+
+        return inner_x, inner_y, inner_w, inner_h
+
+    # ----------------------------
+    # Rounded outline (2px-radius look)
     # ----------------------------
     def _round_rect_outline(self, x, y, w, h, on):
-        # h should be 7 in our spec, but keep general.
-        # Radius=2 look: we "cut" the extreme corner pixels and draw near-corner pixels.
+        # Radius=2 look: "cut" the extreme corner pixels and draw near-corner pixels.
         if w < 4 or h < 4:
-            # fallback
             fb = self._fb()
             if fb and hasattr(fb, "rect"):
                 fb.rect(int(x), int(y), int(w), int(h), self._c(on))
@@ -99,75 +143,137 @@ class ThermoBar:
     # ----------------------------
     # Public API
     # ----------------------------
-    def clear(self, x, y, w):
+    def clear(self, x=None, y=None, w=None, h=None):
         """
         Clears the full bar area (including border).
+        Uses stored geometry if args omitted.
         """
-        self._fill_rect(x, y, w, self.H_TOTAL, on=False)
+        x = self.x if x is None else int(x)
+        y = self.y if y is None else int(y)
+        w = self.width if w is None else int(w)
+        h = self.height if h is None else int(h)
 
-    def draw(self, x, y, w, p, outline=True, clear_bg=True):
+        self._fill_rect(x, y, w, h, on=False)
+
+    def draw(self, x=None, y=None, w=None, h=None, p=None,
+             outline=True, clear_bg=True,
+             mode="left", indicator_p=None):
         """
-        Draw a 7px-high thermo bar.
+        Draw the bar.
 
-        x,y: top-left
-        w:   total width in pixels
-        p:   progress 0..1
-        outline: draw the 1px rounded border
-        clear_bg: clears the bar area first (recommended when animating)
+        Args:
+          x,y,w,h: optional geometry overrides
+          p: progress in [0..1]
+          outline: draw the rounded border
+          clear_bg: clears bar region first
+          mode:
+            - "left"   : fill from left → right (default)
+            - "center" : fill expands from center (breathing style)
+          indicator_p:
+            - if provided (0..1), draw a thin tick marking that position
 
-        Inner fill:
-          - 5px tall
-          - inset by 2px horizontally (looks nicer with rounded corners)
-          - checkerboard dither
-          - solid leading edge
+        Backwards compatibility:
+          You can still call draw(x, y, w, p, ...) via keyword use.
         """
         fb = self._fb()
         if fb is None:
             return
 
-        # Clamp width and progress
-        if w < 10:
-            w = 10
-        if p < 0:
-            p = 0
-        elif p > 1:
-            p = 1
+        x = self.x if x is None else int(x)
+        y = self.y if y is None else int(y)
+        w = self.width if w is None else int(w)
+        h = self.height if h is None else int(h)
 
-        h = self.H_TOTAL
+        if p is None:
+            p = 0.0
+        try:
+            p = float(p)
+        except Exception:
+            p = 0.0
+        p = self._clamp(p, 0.0, 1.0)
 
         if clear_bg:
             self._fill_rect(x, y, w, h, on=False)
 
-        # Border
         if outline:
             self._round_rect_outline(x, y, w, h, on=True)
 
-        # Inner fill geometry:
-        # - 1px border top/bottom => inner band is y+1 .. y+5 (5px)
-        # - 2px horizontal inset (requested “2px inset” feel)
-        inner_y = y + self.BORDER
-        inner_h = self.INNER_H
+        inner_x, inner_y, inner_w, inner_h = self._inner_geom(x, y, w, h)
 
-        inner_x = x + 2
-        inner_w = w - 4
-        if inner_w < 1:
-            return
-
-        # Compute filled width
+        # Compute fill geometry
         fill_w = int(inner_w * p)
         if fill_w <= 0:
-            return
+            # still may draw indicator
+            fill_w = 0
 
-        # Dither fill (checkerboard) across fill_w
-        # We draw pixels rather than fill_rect to create the pattern.
-        for yy in range(inner_y, inner_y + inner_h):
-            for xx in range(inner_x, inner_x + fill_w):
-                # Checkerboard: alternate pixels
-                on = ((xx + yy) & 1) == 0
-                if on:
-                    self._pixel(xx, yy, True)
+        if mode == "center":
+            # fill centered: compute start from center
+            fx = inner_x + (inner_w - fill_w) // 2
+        else:
+            # default: fill from left
+            fx = inner_x
 
-        # Solid leading edge (straight vertical line at the fill front)
-        lead_x = inner_x + fill_w - 1
-        if lead_x >= inner_x:
-            self._vline(lead_x, inner_y, inner_h, on=True)
+        # Dither fill
+        if fill_w > 0:
+            for yy in range(inner_y, inner_y + inner_h):
+                for xx in range(fx, fx + fill_w):
+                    on = ((xx + yy) & 1) == 0
+                    if on:
+                        self._pixel(xx, yy, True)
+
+            # Solid leading edges:
+            # - left mode: only the moving edge
+            # - center mode: both moving edges look better
+            if mode == "center":
+                # left edge
+                self._vline(fx, inner_y, inner_h, on=True)
+                # right edge
+                self._vline(fx + fill_w - 1, inner_y, inner_h, on=True)
+            else:
+                # right edge (fill front)
+                lead_x = fx + fill_w - 1
+                self._vline(lead_x, inner_y, inner_h, on=True)
+
+        # Optional indicator tick
+        if indicator_p is not None:
+            try:
+                ip = float(indicator_p)
+            except Exception:
+                ip = None
+            if ip is not None:
+                ip = self._clamp(ip, 0.0, 1.0)
+                ix = inner_x + int((inner_w - 1) * ip)
+                # Draw a solid tick through the inner band
+                self._vline(ix, inner_y, inner_h, on=True)
+
+    def draw_value(self, value, vmin, vmax,
+                   x=None, y=None, w=None, h=None,
+                   outline=True, clear_bg=True,
+                   mode="left",
+                   indicator=True):
+        """
+        Draw bar by mapping a numeric value to [0..1].
+
+        indicator:
+          - if True, also draws a tick at the mapped value position.
+        """
+        try:
+            v = float(value)
+            lo = float(vmin)
+            hi = float(vmax)
+        except Exception:
+            v = 0.0
+            lo = 0.0
+            hi = 1.0
+
+        if hi <= lo:
+            p = 0.0
+        else:
+            p = (v - lo) / (hi - lo)
+            p = self._clamp(p, 0.0, 1.0)
+
+        ind = p if indicator else None
+        self.draw(x=x, y=y, w=w, h=h, p=p,
+                  outline=outline, clear_bg=clear_bg,
+                  mode=mode,
+                  indicator_p=ind)

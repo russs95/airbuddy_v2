@@ -5,13 +5,14 @@ from machine import Pin
 
 class AirBuddyButton:
     """
-    Safe, blocking button handler for Pico W.
+    Safe, blocking + non-blocking button handler for Pico W.
 
     Features:
       - Long-press debug escape (default: 2s)
       - Single / double / triple click
       - Debounced
-      - REPL-safe (no hard infinite traps)
+      - REPL-safe
+      - Non-blocking poll() for idle / waiting screens
     """
 
     def __init__(
@@ -22,9 +23,14 @@ class AirBuddyButton:
             debug_hold_ms=2000,
     ):
         self.pin = Pin(gpio_pin, Pin.IN, Pin.PULL_UP)
+
         self.click_window_ms = int(float(click_window_s) * 1000)
         self.debounce_ms = int(debounce_ms)
         self.debug_hold_ms = int(debug_hold_ms)
+
+        # --- NEW: lightweight state for polling ---
+        self._last_level = self.pin.value()
+        self._last_change_ms = time.ticks_ms()
 
     # --------------------------------------------------
     # Low-level helpers
@@ -51,7 +57,28 @@ class AirBuddyButton:
             time.sleep_ms(5)
 
     # --------------------------------------------------
-    # Public API
+    # NEW: Non-blocking poll (idle-safe)
+    # --------------------------------------------------
+
+    def poll(self):
+        """
+        Non-blocking check.
+
+        Returns True if button is currently pressed.
+        Safe to call repeatedly (does NOT consume clicks).
+        """
+        level = self.pin.value()
+        now = time.ticks_ms()
+
+        # Track last change (for future extensions if needed)
+        if level != self._last_level:
+            self._last_level = level
+            self._last_change_ms = now
+
+        return level == 0
+
+    # --------------------------------------------------
+    # Blocking API (unchanged behavior)
     # --------------------------------------------------
 
     def wait_for_action(self):

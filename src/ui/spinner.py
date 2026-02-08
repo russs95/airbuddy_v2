@@ -1,32 +1,40 @@
 # src/ui/spinner.py  (MicroPython / Pico-safe)
 import time
+from src.ui.thermobar import ThermoBar
 
 
 class Spinner:
     """
-    Breathing bar spinner for Pico / SSD1306 (no fonts, no Unicode).
+    Breathing bar spinner using ThermoBar (time-driven, Pico-safe).
 
-    - Pure pixel drawing on framebuf
-    - 1px rounded-ish border (2px corner inset)
-    - Inner height: 5px, total height: 7px
-    - Center-expanding/contracting fill
-    - Checkerboard dithering fill
-    - Solid leading edges
+    Fixes:
+      - Duration is REAL time (ticks_ms), not frame-count (so no "10s" drift)
+      - Perfectly symmetric expansion (centered every frame)
+      - Max width reduced to ~60% of screen
+      - Optional label "Sampling..." in MED font
     """
 
-    H_TOTAL = 7
-    INNER_H = 5
+    BAR_H = 7  # ThermoBar visual height (1px border + 5px inner)
+    LABEL = "Sampling..."
 
     def __init__(self, oled):
         self.oled = oled
+        self.bar = ThermoBar(oled)
 
         # Layout
-        self.margin = 10
-        self.y = 42  # default band y (adjust per your layout)
+        self.bar_y = 42
+        self.label_gap = 6
 
-        # Animation
+        # Target frame pacing (ms)
+        # Higher = fewer frames = faster overall on Pico (less CPU)
         self.frame_ms = 45
-        self.step_px = 4  # pixels per frame (speed)
+
+        # Bar sizing
+        self.max_width_ratio = 0.60   # 60% of screen width
+        self.min_width_ratio = 0.18   # minimum breathing width
+
+        # Font
+        self.f_med = getattr(oled, "f_med", None)
 
     # ----------------------------
     # Framebuffer helpers
@@ -36,161 +44,124 @@ class Spinner:
 
     def _show(self):
         fb = self._fb()
-        if fb and hasattr(fb, "show"):
+        if fb:
             fb.show()
-        elif hasattr(self.oled, "show"):
-            self.oled.show()
 
-    def _fill_rect(self, x, y, w, h, color):
-        fb = self._fb()
-        if fb and hasattr(fb, "fill_rect"):
-            fb.fill_rect(int(x), int(y), int(w), int(h), int(color))
-
-    def _pixel(self, x, y, color):
-        fb = self._fb()
-        if fb and hasattr(fb, "pixel"):
-            fb.pixel(int(x), int(y), int(color))
-
-    def _hline(self, x, y, w, color):
-        fb = self._fb()
-        if fb and hasattr(fb, "hline"):
-            fb.hline(int(x), int(y), int(w), int(color))
-
-    def _vline(self, x, y, h, color):
-        fb = self._fb()
-        if fb and hasattr(fb, "vline"):
-            fb.vline(int(x), int(y), int(h), int(color))
-
-    # ----------------------------
-    # Rounded-ish outline (same style as ThermoBar)
-    # ----------------------------
-    def _round_rect_outline(self, x, y, w, h, color):
-        # Radius=2 look by cutting corner pixels
-        if w < 6 or h < 6:
-            # fallback
-            fb = self._fb()
-            if fb and hasattr(fb, "rect"):
-                fb.rect(int(x), int(y), int(w), int(h), int(color))
-            return
-
-        # top/bottom
-        self._hline(x + 2, y, w - 4, color)
-        self._hline(x + 2, y + h - 1, w - 4, color)
-
-        # left/right
-        self._vline(x, y + 2, h - 4, color)
-        self._vline(x + w - 1, y + 2, h - 4, color)
-
-        # corners
-        self._pixel(x + 1, y, color)
-        self._pixel(x, y + 1, color)
-
-        self._pixel(x + w - 2, y, color)
-        self._pixel(x + w - 1, y + 1, color)
-
-        self._pixel(x, y + h - 2, color)
-        self._pixel(x + 1, y + h - 1, color)
-
-        self._pixel(x + w - 1, y + h - 2, color)
-        self._pixel(x + w - 2, y + h - 1, color)
-
-    # ----------------------------
-    # Dither fill with solid leading edges
-    # ----------------------------
-    def _dither_fill(self, x, y, w, h):
-        # checkerboard fill
-        for yy in range(int(y), int(y + h)):
-            for xx in range(int(x), int(x + w)):
-                if ((xx + yy) & 1) == 0:
-                    self._pixel(xx, yy, 1)
-
-    def _draw_breath_bar(self, x, y, w, phase_w):
-        """
-        Draw one frame of the breathing bar.
-
-        x,y: outer box top-left
-        w: total width of outer box
-        phase_w: inner fill width (0..inner_w), centered
-        """
-        # Outer height fixed
-        h = self.H_TOTAL
-
-        # Clear the full bar region first (fast)
-        self._fill_rect(x, y, w, h, 0)
-
-        # Outline
-        self._round_rect_outline(x, y, w, h, 1)
-
-        # Inner region
-        inner_x = x + 2
-        inner_y = y + 1
-        inner_w = w - 4
-        inner_h = self.INNER_H
-
-        if inner_w <= 0:
-            return
-
-        # Clamp phase
-        if phase_w < 0:
-            phase_w = 0
-        if phase_w > inner_w:
-            phase_w = inner_w
-
-        if phase_w == 0:
-            return
-
-        # Centered fill region
-        fx = inner_x + (inner_w - phase_w) // 2
-
-        # Dither fill
-        self._dither_fill(fx, inner_y, phase_w, inner_h)
-
-        # Solid leading edges (left and right edge of the breathing fill)
-        # left edge
-        self._vline(fx, inner_y, inner_h, 1)
-        # right edge
-        self._vline(fx + phase_w - 1, inner_y, inner_h, 1)
+    def _ticks_ms(self):
+        try:
+            return time.ticks_ms()
+        except Exception:
+            return int(time.time() * 1000)
 
     # ----------------------------
     # Public API
     # ----------------------------
-    def spin(self, duration=6.0):
+    def spin(self, duration=3.0):
         """
-        Run breathing spinner animation for `duration` seconds.
+        Runs a single expand->contract cycle over `duration` seconds.
+        Uses real elapsed time so it won't drift long on slow hardware.
         """
         fb = self._fb()
         if fb is None:
             return
 
         screen_w = int(getattr(self.oled, "width", 128))
+        screen_h = int(getattr(self.oled, "height", 64))
+        cx = screen_w // 2
 
-        bar_x = self.margin
-        bar_w = max(30, screen_w - (self.margin * 2))
-        bar_y = int(self.y)
+        # Clear whole screen
+        fb.fill(0)
 
-        # Inner width used for phase calculation
-        inner_w = bar_w - 4
-        if inner_w < 1:
-            return
+        # --- label placement ---
+        label_y = 0
+        label_h = 0
+        if self.f_med:
+            tw, th = self.f_med.size(self.LABEL)
+            tx = max(0, (screen_w - tw) // 2)
+            label_y = max(0, int(self.bar_y) - th - self.label_gap)
+            label_h = th
+            self.f_med.write(self.LABEL, tx, label_y)
 
-        start = time.ticks_ms()
-        end = start + int(duration * 1000)
+        self._show()
 
-        # phase oscillates 0..inner_w..0
-        phase = 0
-        direction = 1
+        # --- bar geometry ---
+        max_w = int(screen_w * self.max_width_ratio)
+        min_w = int(max_w * self.min_width_ratio)
 
-        while time.ticks_diff(end, time.ticks_ms()) > 0:
-            phase += direction * self.step_px
-            if phase >= inner_w:
-                phase = inner_w
-                direction = -1
-            elif phase <= 0:
-                phase = 0
-                direction = 1
+        # safety bounds (keep rounded corners stable)
+        if max_w < 30:
+            max_w = 30
+        if min_w < 12:
+            min_w = 12
+        if min_w > max_w:
+            min_w = max_w
 
-            # Draw frame
-            self._draw_breath_bar(bar_x, bar_y, bar_w, phase)
+        bar_y = int(self.bar_y)
+
+        # Clear band dimensions (label + bar)
+        band_top = max(0, label_y - 1)
+        band_bottom = min(screen_h, bar_y + self.BAR_H + 2)
+        band_h = max(0, band_bottom - band_top)
+
+        # --- time-driven loop ---
+        start = self._ticks_ms()
+        dur_ms = int(float(duration) * 1000)
+        end = time.ticks_add(start, dur_ms)
+
+        while time.ticks_diff(end, self._ticks_ms()) > 0:
+            now = self._ticks_ms()
+            elapsed = time.ticks_diff(now, start)
+            if elapsed < 0:
+                elapsed = 0
+            if elapsed > dur_ms:
+                elapsed = dur_ms
+
+            # Normalized 0..1 across the full duration
+            u = elapsed / float(dur_ms) if dur_ms > 0 else 1.0
+
+            # Triangle wave: 0→1→0 over one duration
+            if u <= 0.5:
+                p = u * 2.0
+            else:
+                p = (1.0 - u) * 2.0
+
+            # Width from min_w..max_w
+            current_w = int(min_w + p * (max_w - min_w))
+            if current_w < 12:
+                current_w = 12
+
+            x = int(cx - (current_w // 2))
+            if x < 0:
+                x = 0
+            if x + current_w > screen_w:
+                current_w = screen_w - x
+
+            # Clear only the band
+            if band_h > 0:
+                fb.fill_rect(0, band_top, screen_w, band_h, 0)
+
+            # Re-draw label (static)
+            if self.f_med:
+                tw, th = self.f_med.size(self.LABEL)
+                tx = max(0, (screen_w - tw) // 2)
+                self.f_med.write(self.LABEL, tx, label_y)
+
+            # Draw fully-filled bar within the centered window
+            self.bar.draw(
+                x=x,
+                y=bar_y,
+                w=current_w,
+                p=1.0,
+                outline=True,
+                clear_bg=False,
+            )
 
             self._show()
-            time.sleep_ms(self.frame_ms)
+
+            # Pace frames, but don't "force sleep" if draw is slow
+            # (prevents duration drift long on Pico)
+            t_after = self._ticks_ms()
+            work_ms = time.ticks_diff(t_after, now)
+            sleep_ms = self.frame_ms - work_ms
+            if sleep_ms > 0:
+                time.sleep_ms(int(sleep_ms))

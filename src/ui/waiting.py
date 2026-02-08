@@ -16,8 +16,17 @@ class WaitingScreen:
         self.flip_y = flip_y
         self.gap = gap
 
-        # animation state (works even without ticks_ms by falling back to time)
+        # animation state
         self._start_ms = None
+
+    # ----------------------------
+    # PUBLIC API (uniform screen interface)
+    # ----------------------------
+    def show(self, oled, line="Know your air...", animate=False, period_ms=1000):
+        """
+        Public entry point used by main.py and other callers.
+        """
+        self.render(oled, line=line, animate=animate, period_ms=period_ms)
 
     # ----------------------------
     # Logo helpers (pixel-accurate; avoids MONO_VLSB blit confusion)
@@ -66,15 +75,25 @@ class WaitingScreen:
         return True
 
     # ----------------------------
-    # Time helpers
+    # Time helpers (wrap-safe)
     # ----------------------------
     def _now_ms(self):
-        # Prefer MicroPython ticks_ms if available
         try:
             return time.ticks_ms()
         except Exception:
-            # fallback: coarse ms
             return int(time.time() * 1000)
+
+    def _elapsed_ms(self, now_ms):
+        """
+        Wrap-safe elapsed time in ms.
+        """
+        if self._start_ms is None:
+            self._start_ms = now_ms
+            return 0
+        try:
+            return time.ticks_diff(now_ms, self._start_ms)
+        except Exception:
+            return now_ms - self._start_ms
 
     def _anim_step(self, period_ms=1000):
         """
@@ -83,96 +102,57 @@ class WaitingScreen:
           1: ".."
           2: "..."
           3: ""   (blank pause)
-          4: ""   (blank pause)  -> gives a little "breath"
+          4: ""   (blank pause)
         """
         now = self._now_ms()
-        if self._start_ms is None:
-            self._start_ms = now
-
-        # 5-step loop: 3 build + 2 blank = 5 seconds total
-        elapsed = now - self._start_ms
-        step = int(elapsed // int(period_ms)) % 5
-        return step
+        elapsed = self._elapsed_ms(now)
+        return int(elapsed // int(period_ms)) % 5
 
     def _animated_line(self, base, period_ms=1000):
-        step = self._anim_step(period_ms=period_ms)
+        step = self._anim_step(period_ms)
         if step == 0:
             return base + "."
         if step == 1:
             return base + ".."
         if step == 2:
             return base + "..."
-        # blank pause
         return base
 
     # ----------------------------
-    # Public render
+    # Core renderer
     # ----------------------------
     def render(self, oled, line="Know your air...", animate=False, period_ms=1000):
-        """
-        Renders the waiting screen to the OLED framebuffer and shows it.
-
-        animate:
-          - if True, animates dots on the end of the base phrase.
-          - If your caller doesn't redraw periodically, you won't see motion.
-        """
         fb = getattr(oled, "oled", None)
         if fb is None:
             return
 
         fb.fill(0)
 
-        # Choose MED for tagline (requested)
         writer = getattr(oled, "f_med", None) or getattr(oled, "f_small", None)
         if writer is None:
-            # ultimate fallback: nothing to render text with
             return
 
-        # For animation, treat the provided line as a base phrase without trailing dots.
         if animate:
-            base = line
-            # strip any trailing dots/spaces for clean rebuild
-            while base.endswith(".") or base.endswith(" "):
-                base = base[:-1]
-            line_to_draw = self._animated_line(base, period_ms=period_ms)
+            base = line.rstrip(". ")
+            line_to_draw = self._animated_line(base, period_ms)
         else:
             line_to_draw = line
 
-        # Logo metrics
         lw = int(getattr(logo_airbuddy, "WIDTH", 0))
         lh = int(getattr(logo_airbuddy, "HEIGHT", 0))
         use_logo = (lw > 0 and lh > 0 and lw <= oled.width and lh <= oled.height)
 
-        # Tagline height
         _, line_h = writer.size(line_to_draw)
 
-        # Total block height
+        total_h = (lh + self.gap + line_h) if use_logo else line_h
+        y0 = max(0, (oled.height - total_h) // 2)
+
         if use_logo:
-            total_h = lh + self.gap + line_h
-        else:
-            total_h = line_h
-
-        y0 = (oled.height - total_h) // 2
-        if y0 < 0:
-            y0 = 0
-
-        # Draw logo centered
-        if use_logo:
-            logo_x = (oled.width - lw) // 2
-            if logo_x < 0:
-                logo_x = 0
-
+            logo_x = max(0, (oled.width - lw) // 2)
             ok = self._blit_logo_fixed(oled, logo_x, y0)
-            if ok:
-                line_y = y0 + lh + self.gap
-            else:
-                line_y = y0
+            line_y = y0 + lh + self.gap if ok else y0
         else:
             line_y = y0
 
-        # Draw tagline centered
         oled.draw_centered(writer, line_to_draw, line_y)
-
-        # Show
-        if hasattr(fb, "show"):
-            fb.show()
+        fb.show()

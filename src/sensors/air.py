@@ -1,13 +1,39 @@
-# src/sensors/air.py  (MicroPython / Pico W)  — Pico-safe (no dataclasses, no PEP604 unions)
+# src/sensors/air.py  (MicroPython / Pico W) — Pico-safe
 import time
 from machine import Pin, I2C
+
+# ---- CO2 confidence helper (you implemented this) ----
+# Adjust the import / function name to match your actual file.
+try:
+    from src.sensors.co2_confidence import co2_confidence_percent
+except Exception:
+    co2_confidence_percent = None
 
 
 class AirReading:
     """
     Lightweight reading container (Pico-safe).
+
+    ready:
+      - True means ENS160 data passed basic validity checks.
+      - False means sensor wasn't ready / values unreliable (UI should show ---).
+    confidence:
+      - 1..100 confidence percentage if available
     """
-    def __init__(self, timestamp, temp_c, humidity, eco2_ppm, tvoc_ppb, aqi, rating, source):
+    def __init__(
+            self,
+            timestamp,
+            temp_c,
+            humidity,
+            eco2_ppm,
+            tvoc_ppb,
+            aqi,
+            rating,
+            source,
+            ready=True,
+            confidence=0,
+            reason=""
+    ):
         self.timestamp = int(timestamp)
         self.temp_c = float(temp_c)
         self.humidity = float(humidity)
@@ -16,6 +42,9 @@ class AirReading:
         self.aqi = int(aqi)
         self.rating = str(rating)
         self.source = str(source)
+        self.ready = bool(ready)
+        self.confidence = int(confidence)
+        self.reason = str(reason)
 
 
 # ----------------------------
@@ -73,7 +102,7 @@ class ENS160:
         self.i2c.writeto(self.addr, bytes([reg, val & 0xFF, (val >> 8) & 0xFF]))
 
     def _init(self):
-        # Read part id (sanity check / smoke test)
+        # Read part id (sanity check)
         _ = self._read(self._REG_PART_ID, 2)
 
         # Set standard operation mode
@@ -81,7 +110,6 @@ class ENS160:
         time.sleep_ms(50)
 
     def set_environment(self, temp_c, rh):
-        # Datasheet style scaling:
         # temp in Kelvin * 64, humidity in %RH * 512
         temp_k = float(temp_c) + 273.15
         tval = int(temp_k * 64)
@@ -89,10 +117,14 @@ class ENS160:
         self._write16(self._REG_TEMP_IN, tval)
         self._write16(self._REG_RH_IN, hval)
 
-    def read_air(self):
+    def read_air_raw(self):
+        """
+        Raw read of AQI/TVOC/eCO2 without any 'ready' gating.
+        """
         aqi = self._read(self._REG_DATA_AQI, 1)[0]
         tvoc = self._read(self._REG_DATA_TVOC, 2)
         eco2 = self._read(self._REG_DATA_ECO2, 2)
+
         tvoc_ppb = tvoc[0] | (tvoc[1] << 8)
         eco2_ppm = eco2[0] | (eco2[1] << 8)
         return aqi, tvoc_ppb, eco2_ppm
@@ -100,12 +132,12 @@ class ENS160:
 
 class AirSensor:
     """
-    MicroPython AirSensor (Pico W):
+    AirSensor:
       - ENS160 + AHT21 read
-      - begin_sampling()/finish_sampling() warmup support (for spinner)
-      - optional lightweight CSV logging (disabled by default)
+      - begin_sampling()/finish_sampling() warmup timer (cosmetic / gating)
+      - robust ENS160 retry loop so you don't get stuck with 0ppm
 
-    NOTE: No background scheduler/threading in v2.1.
+    NOTE: No background thread in v2.1.
     """
 
     def __init__(
@@ -114,24 +146,21 @@ class AirSensor:
             pin_sda=0,
             pin_scl=1,
             freq=100_000,
-            oled_addr=0x3C,     # not used, but handy for scan sanity
             aht21_addr=0x38,
             ens160_addr=0x53,
             log_path="air_records.csv",
     ):
         self.log_path = log_path
-
         self._i2c = I2C(i2c_id, sda=Pin(pin_sda), scl=Pin(pin_scl), freq=freq)
+
         self._aht = AHT21(self._i2c, addr=aht21_addr)
         self._ens = ENS160(self._i2c, addr=ens160_addr)
 
         self._warmup_until = None
         self._warmup_source = None
 
-        # Keep last successful reading in RAM (fast fallback)
-        self._last = None
+        self._last = None  # last good reading
 
-        # Create log file header if logging is used
         self._ensure_log_header()
 
     # ----------------------------
@@ -153,12 +182,64 @@ class AirSensor:
     # ----------------------------
     @staticmethod
     def _now_timestamp():
-        # If RTC/NTP not set, this may be "seconds since 2000-ish" or uptimeish.
-        # Still useful for ordering.
         try:
             return int(time.time())
         except Exception:
             return 0
+
+    # ----------------------------
+    # Validity heuristic (key fix)
+    # ----------------------------
+    @staticmethod
+    def _ens_values_look_ready(aqi, tvoc_ppb, eco2_ppm):
+        """
+        Heuristic readiness checks.
+
+        Notes:
+        - AQI must be 1..5 when valid (0 usually means not ready)
+        - eCO2 should never be 0 in valid operation
+        - typical baseline is around 400ppm
+        """
+        if aqi < 1 or aqi > 5:
+            return False
+        if eco2_ppm <= 0:
+            return False
+        # guardrail: insane readings count as not-ready/invalid
+        if eco2_ppm > 60000:
+            return False
+        if tvoc_ppb > 65000:
+            return False
+        return True
+
+    def _read_ens160_with_retry(self, temp_c, rh, timeout_ms=4000, step_ms=250):
+        """
+        Keep trying until ENS160 values look valid or timeout.
+        Returns (aqi, tvoc_ppb, eco2_ppm, ready_bool, reason)
+        """
+        start = time.ticks_ms()
+        last = None
+
+        while time.ticks_diff(time.ticks_ms(), start) < int(timeout_ms):
+            # Keep env compensation fresh
+            try:
+                self._ens.set_environment(temp_c, rh)
+            except Exception:
+                pass
+
+            try:
+                aqi, tvoc_ppb, eco2_ppm = self._ens.read_air_raw()
+                last = (aqi, tvoc_ppb, eco2_ppm)
+                if self._ens_values_look_ready(aqi, tvoc_ppb, eco2_ppm):
+                    return aqi, tvoc_ppb, eco2_ppm, True, ""
+            except Exception as e:
+                last = None
+
+            time.sleep_ms(int(step_ms))
+
+        # Timeout: return last observed values (or zeros) marked not ready
+        if last is None:
+            return 0, 0, 0, False, "ens160 read failed"
+        return last[0], last[1], last[2], False, "ens160 not ready"
 
     # ----------------------------
     # Core read
@@ -166,14 +247,31 @@ class AirSensor:
     def _read_once(self, source):
         temp_c, rh = self._aht.read()
 
-        # Temperature/humidity compensation
-        try:
-            self._ens.set_environment(temp_c, rh)
-        except Exception:
-            pass
+        # ENS160: retry until ready (this is the main fix)
+        aqi, tvoc_ppb, eco2_ppm, ready, reason = self._read_ens160_with_retry(
+            temp_c, rh, timeout_ms=4500, step_ms=250
+        )
 
-        aqi, tvoc_ppb, eco2_ppm = self._ens.read_air()
-        rating = self._rating_from_aqi(aqi)
+        rating = self._rating_from_aqi(aqi) if ready else "Not ready"
+
+        # Confidence (your module)
+        conf = 0
+        if co2_confidence_percent is not None:
+            try:
+                conf = int(co2_confidence_percent(
+                    eco2_ppm=eco2_ppm,
+                    tvoc_ppb=tvoc_ppb,
+                    aqi=aqi,
+                    temp_c=temp_c,
+                    humidity=rh,
+                    ready=ready,
+                    reason=reason
+                ))
+            except Exception:
+                conf = 0
+        else:
+            # fallback confidence: basically "ready or not"
+            conf = 90 if ready else 0
 
         r = AirReading(
             timestamp=self._now_timestamp(),
@@ -184,15 +282,24 @@ class AirSensor:
             aqi=aqi,
             rating=rating,
             source=source,
+            ready=ready,
+            confidence=conf,
+            reason=reason
         )
-        self._last = r
+
+        # Only store as "last good" when ready
+        if ready:
+            self._last = r
+
         return r
 
     # ----------------------------
-    # Non-blocking warmup
+    # Warmup gating (cosmetic/timing)
     # ----------------------------
     def begin_sampling(self, warmup_seconds, source="button"):
-        self._warmup_until = time.ticks_add(time.ticks_ms(), int(max(0, warmup_seconds) * 1000))
+        self._warmup_until = time.ticks_add(
+            time.ticks_ms(), int(max(0, warmup_seconds) * 1000)
+        )
         self._warmup_source = source
 
     def is_ready(self):
@@ -201,6 +308,7 @@ class AirSensor:
         return time.ticks_diff(time.ticks_ms(), self._warmup_until) >= 0
 
     def finish_sampling(self, log=False):
+        # Allow calling without begin_sampling()
         if self._warmup_until is not None and not self.is_ready():
             raise RuntimeError("Warmup not complete yet")
 
@@ -208,55 +316,46 @@ class AirSensor:
         self._warmup_until = None
         self._warmup_source = None
 
-        try:
-            r = self._read_once(source=source)
-            if log:
-                self._append_log(r)
-            return r
-        except Exception as e:
-            # Fallback to last known good reading if we have one
-            if self._last is not None:
-                return AirReading(
-                    timestamp=self._now_timestamp(),
-                    temp_c=self._last.temp_c,
-                    humidity=self._last.humidity,
-                    eco2_ppm=self._last.eco2_ppm,
-                    tvoc_ppb=self._last.tvoc_ppb,
-                    aqi=self._last.aqi,
-                    rating=self._last.rating,
-                    source="fallback",
-                )
-            raise e
+        r = self._read_once(source=source)
+
+        # If not ready, do NOT throw; return not-ready reading.
+        # UI will show --- and "SENSOR NOT READY".
+        if log and r.ready:
+            self._append_log(r)
+
+        return r
 
     # ----------------------------
     # Optional lightweight logging
     # ----------------------------
     def _ensure_log_header(self):
         try:
-            # If file doesn't exist, this will throw
             with open(self.log_path, "r") as f:
                 _ = f.readline()
         except Exception:
             try:
                 with open(self.log_path, "w") as f:
-                    f.write("timestamp,temp_c,humidity,eco2_ppm,tvoc_ppb,aqi,rating,source\n")
+                    f.write("timestamp,temp_c,humidity,eco2_ppm,tvoc_ppb,aqi,rating,source,ready,confidence,reason\n")
             except Exception:
-                # Logging is optional; don't fail boot
                 pass
 
     def _append_log(self, r):
         try:
             with open(self.log_path, "a") as f:
                 f.write(
-                    "{},{:.2f},{:.2f},{},{},{},{},{}\n".format(
-                        r.timestamp, r.temp_c, r.humidity, r.eco2_ppm, r.tvoc_ppb, r.aqi, r.rating, r.source
+                    "{},{:.2f},{:.2f},{},{},{},{},{},{},{},{}\n".format(
+                        r.timestamp, r.temp_c, r.humidity,
+                        r.eco2_ppm, r.tvoc_ppb, r.aqi,
+                        r.rating, r.source,
+                        int(1 if r.ready else 0),
+                        r.confidence,
+                        r.reason
                     )
                 )
         except Exception:
             pass
 
     def get_last_logged(self):
-        # For v2.1, prefer in-RAM last; file parsing is optional and slow.
         return self._last
 
     def get_log_count(self):
