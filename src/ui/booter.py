@@ -19,10 +19,10 @@ class Booter:
 
     def __init__(self, oled):
         self.oled = oled
-        self.f_ver = getattr(oled, "f_med", None)
+        self.f_ver = getattr(oled, "f_small", None)
 
         # Updated version text
-        self.version = "Version 2.2.0"
+        self.version = "version 2.1.4"
 
         # Logo orientation (confirmed working)
         self.logo_flip_x = False

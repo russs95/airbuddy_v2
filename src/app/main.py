@@ -42,11 +42,13 @@ from src.ui.booter import Booter
 from src.ui.spinner import Spinner
 from src.ui.waiting import WaitingScreen
 from src.ui.screens.co2 import CO2Screen
+from src.ui.screens.tvoc import TVOCScreen
+from src.ui.screens.temp import TempScreen
+from src.ui.screens.time import TimeScreen
 from src.sensors.air import AirSensor
 
-from src.ui.screens.time import TimeScreen
 from src.app.sysinfo import get_time_str, get_date_str, get_ip_address
-
+from src.ui.screens.summary import SummaryScreen
 
 
 # ------------------------------------------------------------
@@ -55,10 +57,9 @@ from src.app.sysinfo import get_time_str, get_date_str, get_ip_address
 
 def init_i2c_rtc():
     """
-    DS3231 is wired to:
+    DS3231 + OLED + sensors on:
       SDA -> GPIO0
       SCL -> GPIO1
-    That's I2C(0) on the Pico.
     """
     i2c = I2C(0, scl=Pin(1), sda=Pin(0), freq=400000)
     print("RTC SDA/SCL raw:",
@@ -77,14 +78,10 @@ def try_sync_system_rtc_from_ds3231(i2c):
         ds = DS3231(i2c)
 
         if ds.lost_power():
-            # OSF means oscillator stopped at some point; time might be garbage.
             print("RTC: DS3231 OSF set (time not trusted).")
             return False
 
         year, month, day, weekday, hour, minute, sec = ds.datetime()
-
-        # DS3231 weekday: 1..7 (Mon..Sun)
-        # MicroPython RTC weekday: typically 0..6
         wd0 = (weekday - 1) % 7
 
         RTC().datetime((year, month, day, wd0, hour, minute, sec, 0))
@@ -94,6 +91,26 @@ def try_sync_system_rtc_from_ds3231(i2c):
     except Exception as e:
         print("RTC: sync attempt failed:", repr(e))
         return False
+
+
+# ------------------------------------------------------------
+# Button helpers (local, no changes needed to button.py)
+# ------------------------------------------------------------
+
+def wait_for_any_press(btn, debounce_ms=60):
+    """
+    Blocks until a button press + release occurs.
+    Used to advance between screens (CO2 -> TVOC -> TEMP).
+    """
+    # wait for press
+    while btn.pin.value() == 1:
+        time.sleep_ms(10)
+    time.sleep_ms(debounce_ms)
+
+    # wait for release
+    while btn.pin.value() == 0:
+        time.sleep_ms(10)
+    time.sleep_ms(debounce_ms)
 
 
 # ------------------------------------------------------------
@@ -111,21 +128,15 @@ def run(rtc_synced=False):
     ds3231 = None
     ds3231_ok = False
     ds3231_osf = False
-    ds3231_temp = None
 
     try:
         ds3231 = DS3231(rtc_i2c)
         ds3231_ok = True
         ds3231_osf = ds3231.lost_power()
-        try:
-            ds3231_temp = ds3231.temperature()
-        except Exception:
-            ds3231_temp = None
-        print("DS3231 OK:", ds3231.datetime(), "OSF=", ds3231_osf, "TEMP=", ds3231_temp)
+        print("DS3231 OK:", ds3231.datetime(), "OSF=", ds3231_osf, "TEMP=", ds3231.temperature())
     except Exception as e:
         print("DS3231 missing:", repr(e))
 
-    # If root main.py didn't sync, we can try once here (safe).
     if (not rtc_synced) and ds3231_ok:
         rtc_synced = try_sync_system_rtc_from_ds3231(rtc_i2c)
 
@@ -136,8 +147,12 @@ def run(rtc_synced=False):
     spinner = Spinner(oled)
     waiting = WaitingScreen()
     co2_screen = CO2Screen(oled)
+    tvoc_screen = TVOCScreen(oled)
+    temp_screen = TempScreen(oled)
     time_screen = TimeScreen(oled)
     air = AirSensor()
+    summary_screen = SummaryScreen(oled)
+
 
     # ----------------------------
     # BOOT + SENSOR WARMUP (ONCE)
@@ -151,58 +166,59 @@ def run(rtc_synced=False):
     # ----------------------------
     while True:
 
-        # ----------------------------
-        # IDLE (STATIC — NO ANIMATION)
-        # ----------------------------
+        # IDLE
         waiting.show(oled, line="Know your air", animate=False)
 
         action = btn.wait_for_action()
 
-        # ----------------------------
         # DEBUG
-        # ----------------------------
         if action == "debug":
             waiting.show(oled, line="Debug mode", animate=False)
             while True:
                 time.sleep(1)
 
-        # ----------------------------
-        # TIME / CLOCK INFO (double click)
-        # ----------------------------
+        # TIME / CLOCK (double click)
         if action == "double":
-            date_str = get_date_str()
-            time_str = get_time_str()
+            def _date():
+                return get_date_str()
 
-            # Refresh temp live
-            temp_c = None
-            if ds3231_ok and ds3231:
-                try:
-                    temp_c = ds3231.temperature()
-                    ds3231_osf = ds3231.lost_power()  # refresh OSF too
-                except Exception:
-                    temp_c = None
+            def _time():
+                return get_time_str()
 
-            source = "RTC" if (rtc_synced and ds3231_ok and (not ds3231_osf)) else "SYS"
+            def _source():
+                return "RTC" if (rtc_synced and ds3231_ok and (not ds3231_osf)) else "SYS"
 
-            time_screen.show(
-                date_str=date_str,
-                time_str=time_str,
-                source=source,
-                temp_c=temp_c
+            def _temp():
+                if ds3231_ok and ds3231:
+                    try:
+                        return ds3231.temperature()
+                    except Exception:
+                        return None
+                return None
+
+            time_screen.show_live(
+                get_date_str=_date,
+                get_time_str=_time,
+                get_source=_source,
+                get_temp_c=_temp,
+                btn=btn,
+                max_seconds=0,
+                blink_ms=500,
+                refresh_every_blinks=2
             )
-            time.sleep(4)
             continue
 
-        # ----------------------------
-        # SAMPLING (single click)
-        # ----------------------------
+        # Only sample on single click
+        if action != "single":
+            continue
+
         cached = False
 
         try:
-            # 1️⃣ Cosmetic spinner ONLY (exactly 3 seconds)
+            # Spinner (cosmetic)
             spinner.spin(duration=3.0)
 
-            # 2️⃣ Read sensor AFTER spinner
+            # Read sensor
             reading = air.finish_sampling(log=False)
 
             if getattr(reading, "source", "") == "fallback":
@@ -219,16 +235,35 @@ def run(rtc_synced=False):
             cached = True
 
         # ----------------------------
-        # DISPLAY CO₂ SCREEN (10s)
+        # Screen sequence (advance by button press)
         # ----------------------------
-        confidence = 70 if cached else 92
-        co2_screen.show(reading, confidence_pct=confidence)
-        time.sleep(10)
 
-# ------------------------------------------------------------
-# ENTRY POINT (DO NOT CALL run() ANYWHERE ELSE)
-# ------------------------------------------------------------
+        # 1) CO2
+        co2_screen.show(reading)
+        wait_for_any_press(btn)
+
+        # 2) TVOC
+        tvoc_screen.show(reading)
+        wait_for_any_press(btn)
+
+        # 3) TEMP (with RTC temp)
+        rtc_temp = None
+        if ds3231_ok and ds3231:
+            try:
+                rtc_temp = ds3231.temperature()
+            except Exception:
+                rtc_temp = None
+
+        temp_screen.show(reading, rtc_temp_c=rtc_temp)
+        wait_for_any_press(btn)
+
+        # 4) SUMMARY
+        summary_screen.show(reading)
+        wait_for_any_press(btn)
+
+
+# back to waiting (loop continues)
+
 
 if __name__ == "__main__":
-    # Backward-compatible direct run
     run(rtc_synced=False)
