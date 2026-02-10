@@ -1,5 +1,8 @@
 ## Raspberry Pi Pico W — AirBuddy 2.1 Wiring
 
+
+https://circuitdigest.com/sites/default/files/inlineimages/u3/Raspberry-Pi-Pico-Pin-Diagram.png
+
 **Orientation:** USB UP  
 **Right column order:** Top → bottom corresponds to physical pins **40 → 21**
 
