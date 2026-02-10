@@ -26,27 +26,6 @@ airBuddy is designed to be:
 - Fully open source
 
 
----
-
-## What airBuddy Does
-
-When powered on, airBuddy shows an idle screen:
-
-> **“airBuddy — Press Button”**
-
-When the button is pressed:
-1. An ASCII spinner appears while readings are gathered  
-2. The sensors collect:
-   - Temperature (°C)
-   - Humidity (%)
-   - eCO₂ (ppm equivalent)
-   - TVOC (ppb)
-3. A simple air‑quality rating is calculated
-4. Results are displayed for **10 seconds**
-5. The readings are logged to `/data/`
-6. The device returns to idle mode
-
----
 
 ## AirBuddy Roadmap
 
@@ -80,4 +59,3 @@ A quick snapshot of where AirBuddy has been — and where it’s heading next.
   Backend logging system initiated; schema and endpoints underway.
 
 
-**Clean air should not be a luxury.**
