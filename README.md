@@ -1,9 +1,9 @@
-# 🌬️ airBuddy  
+# airBuddy v2  
 **Open‑source air quality testing for one's home and community**
 
 ---
 
-## 🌍 1. Overview
+## Overview
 
 **airBuddy** is a small, open‑source air quality testing device.  Version 2.1 is built on a **Raspberry Pi Zero 2 W**.  
 The airBuddy let's one test and track the air quality in one's home-- and later one's community.   The project uses super inexpensive and sensor components that are available just about anywhere, so that just about anyone can put it togeter.
@@ -25,41 +25,10 @@ airBuddy is designed to be:
 - Community‑deployable
 - Fully open source
 
----
-
-## 2. Hardware Components
-
-| Component | Description |
-|--------|-------------|
-| 🧠 **Raspberry Pico 2 W** | Core computer - Make sure you buy the version with the pin hat preinstalled! |
- 🔌 **Micro USB cable(s)** | The Pico has one micro usb port.  You'll need a cable to connect to your computer to load and develop airBuddy code |
-| 🌫 **ENS160 + AHT21 Sensor Board** | Measures eCO₂, TVOC, temperature & humidity - make sure the pin head is preinstalled! |
-| 🖥 **0.96" SSD1306 OLED (I²C)** | 128×64 pixel display - or bring your own and customize the code!|
-| 🔘 **Momentary Push Button** | A solid metal momentary push button - Triggers an air quality test |
-| 🔌 **Jumper Wires** | Get a code assortment of colors.  If your pin heads are pre-installed all you need is female-to-female cables |
-| 🔋 **5V Power Source** | Other than your computer you'll need a way to charge.  You can use a USB power bank or a direct pin connection to the Pico with a battery shield |
-
-| Component                                             | Description                                                                                                                                  |
-| ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| 🧠 **Raspberry Pi Pico 2 W**                          | Core microcontroller with Wi-Fi. Make sure you buy the version with **pre-soldered pin headers**.                                            |
-| 🔌 **Micro USB cable(s)**                             | Used to power the Pico and upload MicroPython / airBuddy firmware during development.                                                        |
-| 🌫 **ENS160 + AHT21 Sensor Board**                    | Primary air sensor measuring **eCO₂, TVOC, temperature, and humidity**. Choose a version with **preinstalled pin headers**.                  |
-| 🖥 **0.96" SSD1306 OLED (I²C)**                       | 128×64 pixel display for UI and readings. (Optional second OLED later if desired.)                                                           |
-| 🔘 **Momentary Push Button**                          | Solid metal momentary button used to trigger readings, wake screens, or cycle views.                                                         |
-| 🔌 **Jumper Wires**                                   | Female-to-female jumper wires (color assortment recommended).                                                                                |
-| 🔋 **5V Power Source**                                | USB power bank, wall adapter, or battery shield (Li-ion / 18650 / solar later).                                                              |
-| 🧭 **NEO-6M GPS Module**                              | Provides **latitude, longitude, altitude, and UTC time** for geotagged air readings. UART-based.                                             |
-| 🧩 **TCA9548A I²C Multiplexer**                       | Expands the Pico’s I²C bus to **8 independent channels**, allowing multiple OLEDs, sensors, and future expansions without address conflicts. |
-| ⏰ **DS3231 RTC Module**                               | High-accuracy real-time clock with coin-cell backup. Keeps time when the device is powered off.                                              |
-| 🌬 **(Optional) Particle Sensor (PMS7003 / PMS5003)** | Measures **PM1.0 / PM2.5 / PM10** particulate matter via UART. Adds real air pollution insight.                                              |
-| 🧪 **(Optional) True CO₂ Sensor (SCD30 / SCD41)**     | NDIR-based **true CO₂ ppm** measurement. More accurate than eCO₂ estimates from VOC sensors.                                                 |
-
-
-
 
 ---
 
-## 🌬️ 3. What airBuddy Does
+## What airBuddy Does
 
 When powered on, airBuddy shows an idle screen:
 
@@ -79,18 +48,36 @@ When the button is pressed:
 
 ---
 
+## AirBuddy Roadmap
 
-## 🌱 Why airBuddy Matters
+A quick snapshot of where AirBuddy has been — and where it’s heading next.
 
-Air pollution is one of the largest hidden public‑health crises on Earth.  
-Yet most people cannot measure the air in their homes, schools, or neighborhoods.
+- ✅ **AirBuddy 1.0 — Raspberry Pi Zero**  
+  First working prototype. Proof of concept achieved.
 
-airBuddy is about **democratizing environmental data**.
+- ❌ **AirBuddy 2.0 — ESP32**  
+  Attempted redesign. Architecture and constraints didn’t hold up.
 
-By making air quality measurable, visible, and shareable:
-- Communities can identify problems
-- Activists can collect evidence
-- Families can protect their health
-- Cities can be held accountable
+- 🚧 **AirBuddy 2.1 — Raspberry Pi Pico**  
+  Current active build. Modular sensors, cleaner power, tighter firmware.
+
+- ✅ **AirBuddy 3D-Printed Casing**  
+  Functional enclosure completed and tested.
+
+- 🚧 **AirBuddy Wooden Casing**  
+  Handcrafted, natural-material enclosure in development.
+
+- ⏭ **AirBuddy 2.2 — ESP32 (Revisited)**  
+  Planned revisit with lessons learned from Pico architecture.
+
+- 🟡 **air.earthen.io API — Data Logging & Sync**  
+  Backend logging system initiated; schema and endpoints underway.
+
+- 🟡 **air.earthen.io Home Dashboard**  
+  Backend logging system initiated; schema and endpoints underway.
+
+- 🟡 **air.earthen.io Community Dashboard**  
+  Backend logging system initiated; schema and endpoints underway.
+
 
 **Clean air should not be a luxury.**
