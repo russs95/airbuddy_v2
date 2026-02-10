@@ -1,25 +1,35 @@
-| Left Side (Pins 1–20)                              | Right Side (Pins 21–40)                            |
-| -------------------------------------------------- | -------------------------------------------------- |
-| 🟩 **1** GP0 → OLED (SDA), ENS160 (SDA), RTC (SDA) | 🟦 **21** GP16                                     |
-| 🟨 **2** GP1 → OLED (SCL), ENS160 (SCL), RTC (SCL) | 🟦 **22** GP17                                     |
-| ⬛ **3** GND                                        | ⬛ **23** GND                                       |
-| ⬜ **4** GP2                                        | ⬜ **24** GP18                                      |
-| ⬜ **5** GP3                                        | ⬜ **25** GP19                                      |
-| ⬜ **6** GP4                                        | ⬜ **26** GP20                                      |
-| ⬜ **7** GP5                                        | ⬜ **27** GP21                                      |
-| ⬛ **8** GND                                        | ⬛ **28** GND                                       |
-| ⬜ **9** GP6                                        | ⬜ **29** GP22                                      |
-| ⬜ **10** GP7                                       | ⬜ **30** RUN                                       |
-| ⬜ **11** GP8                                       | ⬜ **31** GP26 ADC0                                 |
-| ⬜ **12** GP9                                       | ⬜ **32** GP27 ADC1                                 |
-| ⬛ **13** GND                                       | ⬛ **33** GND / AGND                                |
-| ⬜ **14** GP10                                      | ⬜ **34** GP28 ADC2                                 |
-| ⬜ **15** GP11                                      | ⬜ **35** ADC_VREF                                  |
-| ⬜ **16** GP12                                      | 🟥 **36** 3V3(OUT) → OLED VCC, ENS160 VCC, RTC VCC |
-| ⬜ **17** GP13                                      | ⬜ **37** 3V3_EN                                    |
-| ⬛ **18** GND                                       | ⬛ **38** GND                                       |
-| ⬜ **19** GP14                                      | ⬜ **39** VSYS                                      |
-| 🟦 **20** GP15 → Push Button                       | 🟥 **40** VBUS                                     |
+## Raspberry Pi Pico W — AirBuddy 2.1 Wiring
+
+**Orientation:** USB UP  
+**Right column order:** Top → bottom corresponds to physical pins **40 → 21**
+
+| Left Side (Pins 1–20)                                      | Right Side (Pins 40–21)                                      |
+|------------------------------------------------------------|--------------------------------------------------------------|
+| 🟩 **1** GP0 → OLED (SDA), ENS160 (SDA), RTC (SDA)           | ⬜ **40** VBUS                                                |
+| 🟨 **2** GP1 → OLED (SCL), ENS160 (SCL), RTC (SCL)           | ⬜ **39** 5V IN from BATTERY                                  |
+| ⬜ **3** GND                                                 | ⬛ **38** GND from BATTERY                                    |
+| ⬜ **4** GP2                                                 | ⬜ **37** 3V3_EN                                              |
+| ⬜ **5** GP3                                                 | 🟥 **36** 3V3(OUT) → OLED VCC, ENS160 VCC, RTC VCC, GPS            |
+| ⬜ **6** GP4                                                 | ⬜ **35** ADC_VREF                                            |
+| ⬜ **7** GP5                                                 | ⬜ **34** GP28 ADC2                                           |
+| ⬜ **8** GND                                                 | ⬛ **33** GND / AGND → OLED GND, ENS160 GND, RTC GND          |
+| ⬜ **9** GP6                                                 | ⬜ **32** GP27 ADC1                                           |
+| ⬜ **10** GP7                                                | ⬜ **31** GP26 ADC0                                           |
+| 🔵 **11** GP8 → GPS RX                                       | ⬜ **30** RUN                                                 |
+| 🟠 **12** GP9 → GPS TX                                       | ⬜ **29** GP22                                                |
+| ⬛ **13** GND → GPS GROUND                                   | 🟪 **28** GND → BUTTON GND                                   |
+| ⬜ **14** GP10                                               | ⬜ **27** GP21                                                |
+| ⬜ **15** GP11                                               | ⬜ **26** GP20                                                |
+| ⬜ **16** GP12                                               | ⬜ **25** GP19                                                |
+| ⬜ **17** GP13                                               | ⬜ **24** GP18                                                |
+| ⬛ **18** GND                                                 | ⬜ **23** GND                                                 |
+| ⬜ **19** GP14                                               | ⬜ **22** GP17                                                |
+| 🟪 **20** GP15 → BUTTON                                      | ⬜ **21** GP16                                                |
 
 
-<html><head></head><body> Left Side (Pins 1–20) | Right Side (Pins 40–21) -- | -- 🟩 1 GP0 → OLED (SDA), ENS160 (SDA), RTC (SDA) | 🟥 40 VBUS 🟨 2 GP1 → OLED (SCL), ENS160 (SCL), RTC (SCL) | ⬜ 39 VSYS ⬛ 3 GND | ⬛ 38 GND ⬜ 4 GP2 | ⬜ 37 3V3_EN ⬜ 5 GP3 | 🟥 36 3V3(OUT) → OLED VCC, ENS160 VCC, RTC VCC ⬜ 6 GP4 | ⬜ 35 ADC_VREF ⬜ 7 GP5 | ⬜ 34 GP28 ADC2 ⬛ 8 GND | ⬛ 33 GND / AGND → OLED GND, ENS160 GND, RTC GND ⬜ 9 GP6 | ⬜ 32 GP27 ADC1 ⬜ 10 GP7 | ⬜ 31 GP26 ADC0 ⬜ 11 GP8 | ⬜ 30 RUN ⬜ 12 GP9 | ⬜ 29 GP22 ⬛ 13 GND | ⬛ 28 GND → BUTTON GND ⬜ 14 GP10 | ⬜ 27 GP21 ⬜ 15 GP11 | ⬜ 26 GP20 ⬜ 16 GP12 | ⬜ 25 GP19 ⬜ 17 GP13 | ⬜ 24 GP18 ⬛ 18 GND | ⬛ 23 GND ⬜ 19 GP14 | 🟦 22 GP17 🟦 20 GP15 Push Button | 🟦 21 GP16 </body></html>
+**Notes:**
+- All I²C devices share **GP0 (SDA)** and **GP1 (SCL)**
+- All peripherals are powered from **3V3(OUT)** (not VBUS)
+- All GND pins are common
+- Push button uses **internal pull-up** on GP15
+
