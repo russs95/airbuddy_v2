@@ -1,38 +1,96 @@
-## Raspberry Pi Pico W — AirBuddy 2.1 Wiring
+# 🌬️ airBuddy  
+**Open‑source air quality testing for one's home and community**
+
+---
+
+## 🌍 1. Overview
+
+**airBuddy** is a small, open‑source air quality testing device.  Version 2.1 is built on a **Raspberry Pi Zero 2 W**.  
+The airBuddy let's one test and track the air quality in one's home-- and later one's community.   The project uses super inexpensive and sensor components that are available just about anywhere, so that just about anyone can put it togeter.
+
+With one press of a button, airBuddy:
+- Measures **temperature & humidity**
+- Reads **eCO₂ (equivalent CO₂)** and **TVOC (total volatile organic compounds)**
+- Estimates overall **air quality**
+- Displays the results on a compact OLED screen
+- Logs readings to a local data file for long‑term tracking
+
+The goal is simple:
+
+> **If people can measure their air, they can demand better air.**
+
+airBuddy is designed to be:
+- Affordable
+- Hackable
+- Community‑deployable
+- Fully open source
+
+---
+
+## 2. Hardware Components
+
+| Component | Description |
+|--------|-------------|
+| 🧠 **Raspberry Pico 2 W** | Core computer - Make sure you buy the version with the pin hat preinstalled! |
+ 🔌 **Micro USB cable(s)** | The Pico has one micro usb port.  You'll need a cable to connect to your computer to load and develop airBuddy code |
+| 🌫 **ENS160 + AHT21 Sensor Board** | Measures eCO₂, TVOC, temperature & humidity - make sure the pin head is preinstalled! |
+| 🖥 **0.96" SSD1306 OLED (I²C)** | 128×64 pixel display - or bring your own and customize the code!|
+| 🔘 **Momentary Push Button** | A solid metal momentary push button - Triggers an air quality test |
+| 🔌 **Jumper Wires** | Get a code assortment of colors.  If your pin heads are pre-installed all you need is female-to-female cables |
+| 🔋 **5V Power Source** | Other than your computer you'll need a way to charge.  You can use a USB power bank or a direct pin connection to the Pico with a battery shield |
+
+| Component                                             | Description                                                                                                                                  |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| 🧠 **Raspberry Pi Pico 2 W**                          | Core microcontroller with Wi-Fi. Make sure you buy the version with **pre-soldered pin headers**.                                            |
+| 🔌 **Micro USB cable(s)**                             | Used to power the Pico and upload MicroPython / airBuddy firmware during development.                                                        |
+| 🌫 **ENS160 + AHT21 Sensor Board**                    | Primary air sensor measuring **eCO₂, TVOC, temperature, and humidity**. Choose a version with **preinstalled pin headers**.                  |
+| 🖥 **0.96" SSD1306 OLED (I²C)**                       | 128×64 pixel display for UI and readings. (Optional second OLED later if desired.)                                                           |
+| 🔘 **Momentary Push Button**                          | Solid metal momentary button used to trigger readings, wake screens, or cycle views.                                                         |
+| 🔌 **Jumper Wires**                                   | Female-to-female jumper wires (color assortment recommended).                                                                                |
+| 🔋 **5V Power Source**                                | USB power bank, wall adapter, or battery shield (Li-ion / 18650 / solar later).                                                              |
+| 🧭 **NEO-6M GPS Module**                              | Provides **latitude, longitude, altitude, and UTC time** for geotagged air readings. UART-based.                                             |
+| 🧩 **TCA9548A I²C Multiplexer**                       | Expands the Pico’s I²C bus to **8 independent channels**, allowing multiple OLEDs, sensors, and future expansions without address conflicts. |
+| ⏰ **DS3231 RTC Module**                               | High-accuracy real-time clock with coin-cell backup. Keeps time when the device is powered off.                                              |
+| 🌬 **(Optional) Particle Sensor (PMS7003 / PMS5003)** | Measures **PM1.0 / PM2.5 / PM10** particulate matter via UART. Adds real air pollution insight.                                              |
+| 🧪 **(Optional) True CO₂ Sensor (SCD30 / SCD41)**     | NDIR-based **true CO₂ ppm** measurement. More accurate than eCO₂ estimates from VOC sensors.                                                 |
 
 
-https://circuitdigest.com/sites/default/files/inlineimages/u3/Raspberry-Pi-Pico-Pin-Diagram.png
-
-**Orientation:** USB UP  
-**Right column order:** Top → bottom corresponds to physical pins **40 → 21**
-
-| Left Side (Pins 1–20)                                      | Right Side (Pins 40–21)                                      |
-|------------------------------------------------------------|--------------------------------------------------------------|
-| 🟩 **1** GP0 → OLED (SDA), ENS160 (SDA), RTC (SDA)           | ⬜ **40** VBUS                                                |
-| 🟨 **2** GP1 → OLED (SCL), ENS160 (SCL), RTC (SCL)           | ⬜ **39** 5V IN from BATTERY                                  |
-| ⬜ **3** GND                                                 | ⬛ **38** GND from BATTERY                                    |
-| ⬜ **4** GP2                                                 | ⬜ **37** 3V3_EN                                              |
-| ⬜ **5** GP3                                                 | 🟥 **36** 3V3(OUT) → OLED VCC, ENS160 VCC, RTC VCC, GPS            |
-| ⬜ **6** GP4                                                 | ⬜ **35** ADC_VREF                                            |
-| ⬜ **7** GP5                                                 | ⬜ **34** GP28 ADC2                                           |
-| ⬜ **8** GND                                                 | ⬛ **33** GND / AGND → OLED GND, ENS160 GND, RTC GND          |
-| ⬜ **9** GP6                                                 | ⬜ **32** GP27 ADC1                                           |
-| ⬜ **10** GP7                                                | ⬜ **31** GP26 ADC0                                           |
-| 🔵 **11** GP8 → GPS RX                                       | ⬜ **30** RUN                                                 |
-| 🟠 **12** GP9 → GPS TX                                       | ⬜ **29** GP22                                                |
-| ⬛ **13** GND → GPS GROUND                                   | 🟪 **28** GND → BUTTON GND                                   |
-| ⬜ **14** GP10                                               | ⬜ **27** GP21                                                |
-| ⬜ **15** GP11                                               | ⬜ **26** GP20                                                |
-| ⬜ **16** GP12                                               | ⬜ **25** GP19                                                |
-| ⬜ **17** GP13                                               | ⬜ **24** GP18                                                |
-| ⬛ **18** GND                                                 | ⬜ **23** GND                                                 |
-| ⬜ **19** GP14                                               | ⬜ **22** GP17                                                |
-| 🟪 **20** GP15 → BUTTON                                      | ⬜ **21** GP16                                                |
 
 
-**Notes:**
-- All I²C devices share **GP0 (SDA)** and **GP1 (SCL)**
-- All peripherals are powered from **3V3(OUT)** (not VBUS)
-- All GND pins are common
-- Push button uses **internal pull-up** on GP15
+---
 
+## 🌬️ 3. What airBuddy Does
+
+When powered on, airBuddy shows an idle screen:
+
+> **“airBuddy — Press Button”**
+
+When the button is pressed:
+1. An ASCII spinner appears while readings are gathered  
+2. The sensors collect:
+   - Temperature (°C)
+   - Humidity (%)
+   - eCO₂ (ppm equivalent)
+   - TVOC (ppb)
+3. A simple air‑quality rating is calculated
+4. Results are displayed for **10 seconds**
+5. The readings are logged to `/data/`
+6. The device returns to idle mode
+
+---
+
+
+## 🌱 Why airBuddy Matters
+
+Air pollution is one of the largest hidden public‑health crises on Earth.  
+Yet most people cannot measure the air in their homes, schools, or neighborhoods.
+
+airBuddy is about **democratizing environmental data**.
+
+By making air quality measurable, visible, and shareable:
+- Communities can identify problems
+- Activists can collect evidence
+- Families can protect their health
+- Cities can be held accountable
+
+**Clean air should not be a luxury.**
