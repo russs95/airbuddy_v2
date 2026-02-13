@@ -355,3 +355,55 @@ class AirSensor:
             return max(0, n - 1)
         except Exception:
             return 0
+
+
+    def read_quick(self, source="summary"):
+        """
+        Faster read intended for live UI refresh.
+        Uses shorter ENS retry window and returns last_good if not ready.
+        """
+        try:
+            temp_c, rh = self._aht.read()
+            aqi, tvoc_ppb, eco2_ppm, ready, reason = self._read_ens160_with_retry(
+                temp_c, rh, timeout_ms=1000, step_ms=200
+            )
+            rating = self._rating_from_aqi(aqi) if ready else "Not ready"
+
+            conf = 0
+            try:
+                from src.sensors.co2_confidence import calculate_co2_confidence
+                last = self._last
+                conf = calculate_co2_confidence(
+                    ens_valid=ready,
+                    warmup_done=True,      # summary is post-warmup in your flow
+                    temp_ok=True,
+                    rh_ok=True,
+                    eco2_ppm=int(eco2_ppm),
+                    last_eco2_ppm=int(last.eco2_ppm) if last else None,
+                    aqi=int(aqi),
+                    last_aqi=int(last.aqi) if last else None,
+                    source=source,
+                )
+            except Exception:
+                conf = 90 if ready else 0
+
+            r = AirReading(
+                timestamp=self._now_timestamp(),
+                temp_c=temp_c,
+                humidity=rh,
+                eco2_ppm=eco2_ppm,
+                tvoc_ppb=tvoc_ppb,
+                aqi=aqi,
+                rating=rating,
+                source=source,
+                ready=ready,
+                confidence=conf,
+                reason=reason
+            )
+            if ready:
+                self._last = r
+                return r
+            return self._last or r
+        except Exception:
+            return self._last
+

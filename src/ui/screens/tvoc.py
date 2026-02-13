@@ -3,33 +3,30 @@
 # Pico / MicroPython safe
 
 from src.ui.thermobar import ThermoBar
+from src.ui.glyphs import draw_face9
 
 
 class TVOCScreen:
     """
-    TVOC (ppb) screen (128x64), matching CO2Screen layout.
+    TVOC (ppb) screen (128x64), aligned to CO2Screen template.
 
-    Top left:
-      - "TVOC" (MED, faux-bold)
-      - "PPB" (SMALL/VSMALL)
-      - Status line: "<conf>% CONF" or "SENSOR NOT READY"
+    Scale (ppb) reference (common guidance-ish):
+      0      220      660      2200     5500
+      :-)     OK      POOR      BAD      xx-(
 
-    Top right:
-      - TVOC value (LARGE, right aligned) when ready
-      - When NOT ready: no value shown
-
-    Bottom:
-      - Scale numbers above bar (VSMALL)
-      - ThermoBar filled in 10 discrete steps
-      - Qualitative labels below bar (VSMALL)
+    Confidence:
+      - uses reading.confidence if present
+      - if confidence_pct passed in, it overrides reading.confidence
+      - if nothing available, shows "XX% CONF"
     """
 
-    DISPLAY_DURATION = 4  # seconds
+    DISPLAY_DURATION = 4
 
     def __init__(self, oled):
         self.oled = oled
 
-        # Fonts
+        # Fonts (match CO2)
+        self.f_arvo = getattr(oled, "f_arvo", None)
         self.f_med = oled.f_med
         self.f_large = oled.f_large
         self.f_small = getattr(oled, "f_small", None)
@@ -41,41 +38,49 @@ class TVOCScreen:
         # ----------------------------
         # Scale numbers above bar (ppb)
         # ----------------------------
-        # Breakpoints (approx common guidance):
-        # 0-220 good, 220-660 ok, 660-2200 poor, 2200-5500 bad/hazard
-        self.scale_ppb = [0, 220, 660, 2200, 5500]
-        self.scale_x = [2, 30, 54, 86, 108]  # tuned for 128px
+        self.scale_ppb = [200, 600, 2000, 5000]
+        self.scale_x = [2, 40, 82, 104]
+        self.tick_ppb = [200, 600, 2000, 5000]
 
-        # ----------------------------
-        # Qualitative labels below bar
-        # ----------------------------
-        self.labels = ["GOOD", "OK", "POOR", "BAD", "!!!"]
-        self.label_x = [2, 36, 60, 88, 112]
 
-        # Layout
+# Layout tuning (match CO2)
         self.bar_x = 2
         self.bar_w = int(self.oled.width) - 4
 
-        self.scale_y = 35
-        self.bar_y = 43
-        self.labels_y = max(0, int(self.oled.height) - 10)
+        self.scale_y = 34
+        self.bar_y = 45  # lowered by 2px to avoid touching numbers
+
+        # Bottom labels (faces at ends + text middle)
+        self.left_face = "good"
+        self.right_face = "verybad"
+
+        self.faces_y = max(0, int(self.oled.height) - 9)
+        _, h_vs = self.oled._text_size(self.f_vs, "Ag")
+        self.labels_y = max(0, self.faces_y + 9 - h_vs)
+
+        self.left_face_x = 2
+        self.label_texts = ["OK", "POOR", "BAD"]
+        self.label_x = [28, 56, 86]
+        self.right_face_x = 110
+
+        # Optional per-tick pixel nudges (like your CO2 trick)
+        self.tick_offset = {
+            # 220: 2,
+            # 660: -1,
+            # 2200: -2,
+            # 5500: -6,
+        }
 
     # -------------------------------------------------
     # Public API
     # -------------------------------------------------
     def show(self, reading, confidence_pct=None):
-        """
-        reading.tvoc_ppb required (but may be 0 when not ready)
-        reading.ready (bool) optional
-        reading.confidence optional (preferred)
-        confidence_pct: optional override (int 0..100)
-        """
         self.oled.clear()
 
         tvoc = int(getattr(reading, "tvoc_ppb", 0))
         ready = bool(getattr(reading, "ready", True))
 
-        # Confidence (same pattern as CO2 screen)
+        # Confidence
         conf = None
         if confidence_pct is not None:
             try:
@@ -99,7 +104,8 @@ class TVOCScreen:
         self._draw_header(tvoc, conf_text, not_ready)
         self._draw_scale_numbers()
         self._draw_bar(tvoc, not_ready)
-        self._draw_labels()
+        self._draw_fixed_ticks()
+        self._draw_bottom_labels()
 
         self.oled.oled.show()
 
@@ -110,23 +116,30 @@ class TVOCScreen:
         x0 = 2
         y0 = 0
 
-        # Faux-bold "TVOC"
-        self.f_med.write("TVOC", x0, y0)
-        self.f_med.write("TVOC", x0 + 1, y0)
+        # Title "TVOC" using Arvo16 if available, else MED
+        title_writer = self.f_arvo if self.f_arvo else self.f_med
+        title_writer.write("TVOC", x0, y0)
 
-        # "PPB" in SMALL (fallback to VSMALL)
-        w_main, _ = self.f_med.size("TVOC")
+        # Unit "PPB" in SMALL (fallback VSMALL) — same style as CO2
+        w_main, _ = title_writer.size("TVOC")
         unit_writer = self.f_small if self.f_small else self.f_vs
-        unit_writer.write("PPB", x0 + int(w_main) + 6, y0 + (4 if unit_writer is self.f_small else 5))
+        unit_x = x0 + int(w_main) + 6
+        unit_y = y0 + (4 if unit_writer is self.f_small else 5)
+        unit_writer.write("PPB", unit_x, unit_y)
 
-        status_y = 14
+        # Status / confidence line (raised back up)
+        status_y = 14  # original position
+
         if not_ready:
             self.f_med.write("SENSOR NOT READY", x0, status_y)
         else:
-            self.f_med.write(conf_text, x0, status_y)
             conf_writer = self.f_small if self.f_small else self.f_vs
-            w_pct, _ = self.f_med.size(conf_text)
-            conf_writer.write("CONF", x0 + int(w_pct) + 6, status_y + (2 if conf_writer is self.f_small else 3))
+            conf_y = status_y  # no extra offset now
+
+            conf_writer.write(conf_text, x0, conf_y)
+            w_pct, _ = conf_writer.size(conf_text)
+            conf_writer.write("CONF", x0 + int(w_pct) + 6, conf_y)
+
 
         # Value top-right, LARGE (only when ready)
         if not not_ready:
@@ -137,31 +150,36 @@ class TVOCScreen:
             self.f_large.write(val, x, y)
 
     def _draw_scale_numbers(self):
+        # numbers above bar should be SMALL (fallback to VSMALL)
+        writer = self.f_small if self.f_small else self.f_vs
         y = self.scale_y
         for v, x in zip(self.scale_ppb, self.scale_x):
-            self.f_vs.write(str(v), int(x), int(y))
+            writer.write(str(v), int(x), int(y))
 
     def _tvoc_to_step_p(self, tvoc):
         """
-        Convert TVOC ppb to 10-step bar fill.
-        We use 0..5500 mapping and quantize to tenths.
+        Map TVOC ppb into 10 discrete fill positions (0.0 .. 1.0 in steps of 0.1)
+        using bins aligned to your scale points.
+
+        Bins:
+          0..220..660..2200..5500 spread into 10 steps.
         """
-        if tvoc <= 0:
+        edges = [0, 60, 120, 180, 220, 400, 660, 1200, 2200, 3500, 5500]
+
+        if tvoc <= edges[0]:
             return 0.0
-        if tvoc >= 5500:
+        if tvoc >= edges[-1]:
             return 1.0
 
-        p_raw = tvoc / 5500.0
-        # quantize to 10 steps
-        step = int(p_raw * 10 + 0.999)  # ceil-ish so small values show something
-        if step < 0:
-            step = 0
-        if step > 10:
-            step = 10
-        return step / 10.0
+        for i in range(10):
+            if edges[i] <= tvoc < edges[i + 1]:
+                return (i + 1) / 10.0
+
+        return 1.0
 
     def _draw_bar(self, tvoc, not_ready):
         p = 0.0 if not_ready else self._tvoc_to_step_p(int(tvoc))
+
         self.bar.draw(
             x=self.bar_x,
             y=self.bar_y,
@@ -171,7 +189,62 @@ class TVOCScreen:
             clear_bg=False
         )
 
-    def _draw_labels(self):
-        y = self.labels_y
-        for label, x in zip(self.labels, self.label_x):
-            self.f_vs.write(label, int(x), int(y))
+        # Pointer at end of fill
+        if not not_ready:
+            x_end = self.bar_x + int(round(p * (self.bar_w - 1)))
+            x_end = max(self.bar_x, min(self.bar_x + self.bar_w - 1, x_end))
+            self.oled.oled.pixel(x_end, self.bar_y - 1, 1)
+
+    def _inner_track_limits(self):
+        # Must match ThermoBar inner geometry: inner_x=x+2 ; inner_w=w-4
+        inner_x = self.bar_x + 2
+        inner_w = self.bar_w - 4
+        lo = inner_x
+        hi = inner_x + inner_w - 1
+        return lo, hi
+
+    def _tick_x_for_label_center(self, v):
+        writer = self.f_small if self.f_small else self.f_vs
+
+        try:
+            i = self.scale_ppb.index(v)
+            x_label = int(self.scale_x[i])
+        except Exception:
+            x_label = 0
+
+        txt = str(v)
+        tw, _ = writer.size(txt)
+        x_center = x_label + (int(tw) // 2)
+
+        # manual nudges (optional)
+        x_center += int(self.tick_offset.get(v, 0))
+
+        lo, hi = self._inner_track_limits()
+        if x_center < lo:
+            x_center = lo
+        if x_center > hi:
+            x_center = hi
+
+        return x_center
+
+    def _draw_tick(self, x):
+        # 1px taller than above the top border + crosses into bar
+        y0 = self.bar_y - 2
+        for yy in range(6):  # 6px tall
+            self.oled.oled.pixel(int(x), int(y0 + yy), 1)
+
+    def _draw_fixed_ticks(self):
+        for v in self.tick_ppb:
+            x = self._tick_x_for_label_center(v)
+            self._draw_tick(x)
+
+    def _draw_bottom_labels(self):
+        y_face = self.faces_y
+        y_text = self.labels_y
+
+        draw_face9(self.oled.oled, int(self.left_face_x), int(y_face), mood=self.left_face, scale=1, color=1)
+
+        for txt, x in zip(self.label_texts, self.label_x):
+            self.f_vs.write(txt, int(x), int(y_text))
+
+        draw_face9(self.oled.oled, int(self.right_face_x), int(y_face), mood=self.right_face, scale=1, color=1)

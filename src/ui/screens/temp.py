@@ -5,13 +5,15 @@ from src.ui.glyphs import draw_degree, draw_circle
 
 class TempScreen:
     """
-    Temp screen:
+    Clean temperature screen:
 
       Top (MED):      "Temperature" (centered)
-      Middle (LARGE): <temp>°C  (degree ring drawn in pixels + C)
-      Bottom-left:    ● <rtc_temp.x>°C  (MED)  (circle glyph + 1 decimal)
-      Bottom-right:   RH xx% (MED) if available
+      Middle (LARGE): 31.7 °C  (degree glyph + MED C)
+      Bottom-left:    ● 28.4 °C (RTC temp, filled circle glyph)
+      Bottom-right:   RH xx%
     """
+
+    CALIBRATION_OFFSET = -3.0  # subtract 3°C from measured value
 
     def __init__(self, oled):
         self.oled = oled
@@ -19,155 +21,141 @@ class TempScreen:
     # -------------------------------------------------
     # Helpers
     # -------------------------------------------------
+
     @staticmethod
-    def _round_1dp_half_up(x):
-        """
-        Round to 1 decimal with half-up behavior.
-        Example: 29.25 -> 29.3
-        """
+    def _round_1dp(x):
         try:
-            x = float(x)
+            return round(float(x), 1)
         except Exception:
             return None
-        return int(x * 10 + 0.5) / 10.0
+
+    def _format_temp(self, t):
+        if t is None:
+            return None
+        return "{:.1f}".format(t)
 
     # -------------------------------------------------
     # Drawing helpers
     # -------------------------------------------------
-    def _draw_temp_value_large(self, temp_c, y):
+
+    def _draw_main_temp(self, temp_str, y):
         """
-        Draw centered LARGE: <int temp> + degree ring + C
+        Draw centered LARGE number + pixel degree + MED C.
         """
-        if temp_c is None:
-            self.oled.draw_centered(self.oled.f_large, "--", y)
+
+        if not temp_str:
+            self.oled.draw_centered(self.oled.f_large, "--.-", y)
             return
 
-        try:
-            t = int(round(float(temp_c)))
-        except Exception:
-            self.oled.draw_centered(self.oled.f_large, "--", y)
-            return
+        # Measure pieces
+        w_num, h_large = self.oled._text_size(self.oled.f_large, temp_str)
+        w_c, h_med = self.oled._text_size(self.oled.f_med, "C")
 
-        num = str(t)
-
-        # Measure widths with LARGE font
-        w_num, _ = self.oled._text_size(self.oled.f_large, num)
-        w_c, _ = self.oled._text_size(self.oled.f_large, "C")
-
-        # Degree ring sizing (px)
         deg_r = 2
-        deg_w = deg_r * 2 + 1  # ~5px
+        deg_w = deg_r * 2 + 1
 
-        total_w = w_num + 2 + deg_w + 2 + w_c
+        gap1 = 2  # number -> degree
+        gap2 = 2  # degree -> C
+
+        total_w = w_num + gap1 + deg_w + gap2 + w_c
         x0 = max(0, (self.oled.width - total_w) // 2)
 
-        # Draw number
-        self.oled.f_large.write(num, x0, y)
+        # Draw LARGE number
+        self.oled.f_large.write(temp_str, x0, y)
+        x = x0 + w_num + gap1
 
-        # Draw degree ring
-        x_deg = x0 + w_num + 2
-        y_deg = y + 4
-        draw_degree(self.oled.oled, x_deg, y_deg, r=deg_r, color=1)
+        # Draw pixel degree
+        draw_degree(self.oled.oled, x, y + 6, r=deg_r, color=1)
+        x += deg_w + gap2
 
-        # Draw C
-        x_c = x_deg + deg_w + 2
-        self.oled.f_large.write("C", x_c, y)
+        # Draw MED "C"
+        self.oled.f_med.write("C", x, y + (h_large - h_med) // 2)
 
-    def _draw_rtc_temp_left(self, rtc_temp_c, y):
+    def _draw_rtc_temp(self, rtc_str, x, y):
         """
-        Draw bottom-left: filled circle icon + <temp.x> + degree ring + C in MED.
-        Temp shown with 1 decimal (half-up).
+        Draw: ● 28.4 °C  (MED text + pixel degree)
         """
-        if rtc_temp_c is None:
+
+        if not rtc_str:
             return
 
-        t = self._round_1dp_half_up(rtc_temp_c)
-        if t is None:
-            return
+        # Draw filled circle glyph (reliable)
+        r = 4
+        cx = x + r
+        cy = y + 6
+        draw_circle(self.oled.oled, cx, cy, r=r, filled=True, color=1)
 
-        # Always show one decimal
-        t_str = "{:.1f}".format(t)
+        x_text = x + (r * 2) + 4
 
-        # Measure MED parts
-        w_num, _ = self.oled._text_size(self.oled.f_med, t_str)
-        w_c, _ = self.oled._text_size(self.oled.f_med, "C")
+        # Draw temp number
+        self.oled.f_med.write(rtc_str, x_text, y)
+        w_num, h_med = self.oled._text_size(self.oled.f_med, rtc_str)
 
         deg_r = 2
-        deg_w = deg_r * 2 + 1  # ~5px
+        deg_w = deg_r * 2 + 1
 
-        # Circle (pixel) sizing
-        circ_r = 4
-        circ_w = circ_r * 2 + 1  # ~9px
+        x_deg = x_text + w_num + 2
+        draw_degree(self.oled.oled, x_deg, y + 3, r=deg_r, color=1)
 
-        # Draw starting at left padding
-        x0 = 2
-
-        # Circle baseline alignment (tuned for MED)
-        cx = x0 + circ_r
-        cy = y + 8
-        draw_circle(self.oled.oled, cx, cy, r=circ_r, filled=True, color=1)
-
-        x = x0 + circ_w + 2
-
-        # Temp number (with 1 decimal)
-        self.oled.f_med.write(t_str, x, y)
-        x += w_num + 2
-
-        # Degree ring (pixel)
-        draw_degree(self.oled.oled, x, y + 2, r=deg_r, color=1)
-        x += deg_w + 2
-
-        # C
-        self.oled.f_med.write("C", x, y)
-
-    def _draw_rh_right(self, reading, y):
-        """
-        Draw bottom-right RH in MED.
-        """
-        rh = getattr(reading, "humidity", None) if reading is not None else None
-        if rh is None:
-            return
-        try:
-            rh_i = int(round(float(rh)))
-        except Exception:
-            return
-
-        text = "RH {}%".format(rh_i)
-        w, _ = self.oled._text_size(self.oled.f_med, text)
-        x = max(0, self.oled.width - w - 2)
-        self.oled.f_med.write(text, x, y)
+        self.oled.f_med.write("C", x_deg + deg_w + 2, y)
 
     # -------------------------------------------------
     # Public
     # -------------------------------------------------
+
     def show(self, reading=None, rtc_temp_c=None):
-        """
-        reading: object with .temp_c and optionally .humidity
-        rtc_temp_c: float/int temp from DS3231 (optional)
-        """
         self.oled.oled.fill(0)
 
+        # -------------------------------------------------
         # Heading
+        # -------------------------------------------------
         self.oled.draw_centered(self.oled.f_med, "Temperature", 0)
 
-        # Bottom row baseline (MED height)
+        # -------------------------------------------------
+        # Main sensor temp (apply calibration)
+        # -------------------------------------------------
+        temp_c = getattr(reading, "temp_c", None) if reading else None
+
+        if temp_c is not None:
+            temp_c = self._round_1dp(temp_c + self.CALIBRATION_OFFSET)
+
+        temp_str = self._format_temp(temp_c)
+
+        # Layout calculations
+        _, h_large = self.oled._text_size(self.oled.f_large, "88.8")
         _, h_med = self.oled._text_size(self.oled.f_med, "Ag")
-        y_bottom = max(0, self.oled.height - h_med - 1)
 
-        # Value placement (LARGE)
-        temp_c = getattr(reading, "temp_c", None) if reading is not None else None
-        _, h_large = self.oled._text_size(self.oled.f_large, "88C")
+        y_top = h_med + 4
+        y_bottom_row = self.oled.height - h_med - 1
 
-        top_block = h_med + 2
-        bottom_block = y_bottom - 1
-        available = max(0, bottom_block - top_block)
-        y_val = top_block + max(0, (available - h_large) // 2)
+        available = y_bottom_row - y_top
+        y_val = y_top + max(0, (available - h_large) // 2)
 
-        # Main temperature
-        self._draw_temp_value_large(temp_c, y_val)
+        # Draw main temperature
+        self._draw_main_temp(temp_str, y_val)
 
-        # Bottom info row (swapped)
-        self._draw_rtc_temp_left(rtc_temp_c, y_bottom)
-        self._draw_rh_right(reading, y_bottom)
+        # -------------------------------------------------
+        # Bottom-left RTC temp (no calibration)
+        # -------------------------------------------------
+        rtc_str = None
+        if rtc_temp_c is not None:
+            rtc_temp_c = self._round_1dp(rtc_temp_c)
+            rtc_str = self._format_temp(rtc_temp_c)
+
+        self._draw_rtc_temp(rtc_str, 2, y_bottom_row)
+
+        # -------------------------------------------------
+        # Bottom-right humidity
+        # -------------------------------------------------
+        rh = getattr(reading, "humidity", None) if reading else None
+        if rh is not None:
+            try:
+                rh_i = int(round(float(rh)))
+                right_text = "RH {}%".format(rh_i)
+                w, _ = self.oled._text_size(self.oled.f_med, right_text)
+                x = self.oled.width - w - 2
+                self.oled.f_med.write(right_text, x, y_bottom_row)
+            except Exception:
+                pass
 
         self.oled.oled.show()

@@ -15,12 +15,14 @@ Semantic font roles:
 from . import ezFBfont_amstrad_cpc_extended_supp_08 as SYMBOLS
 
 # Sans-serif text fonts
-from . import ezFBfont_PTSansNarrow_06_ascii_08 as VSMALL
+from . import narrow7 as VSMALL
 from . import ezFBfont_PTSansNarrow_07_ascii_11 as SMALL
-from . import ezFBfont_PTSansNarrow_10_ascii_14 as MED
+from . import mulish14 as MED
 
 # Serif / hero font (time, big numbers, title)
-from . import ezFBfont_ncenB24_time_24 as LARGE
+from . import arvo24 as LARGE
+from . import arvo16 as ARVO16
+
 
 
 # --- Registry helpers ---
@@ -33,7 +35,11 @@ _REGISTRY = {
     "large": LARGE,
     "hero": LARGE,
     "symbols": SYMBOLS,
+
+    "arvo": ARVO16,
+    "arvo16": ARVO16,
 }
+
 
 def get(name: str):
     """Return a font module by semantic name."""

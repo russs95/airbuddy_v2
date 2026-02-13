@@ -72,10 +72,10 @@ class AirBuddyButton:
         Returns:
           "debug", "single", "double", "triple" or None
 
-        How it works:
-          - Debounces transitions
-          - Detects long-hold while pressed => "debug"
-          - Counts up to 3 clicks; emits when click_window expires after last release
+        Behavior:
+          - debug: emitted while held
+          - double/triple: emitted immediately on release
+          - single: emitted when click window expires
         """
         now = time.ticks_ms()
         level = self.pin.value()
@@ -85,58 +85,56 @@ class AirBuddyButton:
             self._last_level = level
             self._last_change_ms = now
 
-        # Debounce: only accept change if stable for debounce_ms
+        # Debounce: only accept change if stable
         if level != self._stable_level:
             if time.ticks_diff(now, self._last_change_ms) >= self.debounce_ms:
                 self._stable_level = level
 
-                # --- Stable edge detected ---
+                # ---------- STABLE EDGE ----------
                 if self._stable_level == 0:
                     # pressed
                     self._press_start_ms = now
 
                 else:
                     # released
-                    # if we were timing a press, count it as a click (unless it was debug)
                     if self._press_start_ms is not None:
                         held_ms = time.ticks_diff(now, self._press_start_ms)
                         self._press_start_ms = None
 
-                        # If it was a long press, we already would have returned debug while held.
-                        # Treat as click otherwise.
+                        # short press = click
                         if held_ms < self.debug_hold_ms:
                             if self._click_count == 0:
                                 self._click_window_start_ms = now
                             self._click_count += 1
+
+                            # 🔥 IMMEDIATE EMIT FOR DOUBLE / TRIPLE
+                            if self._click_count == 2:
+                                self._click_count = 0
+                                self._click_window_start_ms = None
+                                return "double"
+
                             if self._click_count >= 3:
-                                # emit immediately on triple
                                 self._click_count = 0
                                 self._click_window_start_ms = None
                                 return "triple"
 
-        # If currently pressed, check for debug hold
+        # ---------- DEBUG HOLD ----------
         if self._stable_level == 0 and self._press_start_ms is not None:
             if time.ticks_diff(now, self._press_start_ms) >= self.debug_hold_ms:
-                # Reset click state and emit debug
+                self._press_start_ms = None
                 self._click_count = 0
                 self._click_window_start_ms = None
-                self._press_start_ms = None
-                # Wait for release is NOT done here (non-blocking).
                 return "debug"
 
-        # If we have pending clicks, emit when click window expires
-        if self._click_count > 0 and self._click_window_start_ms is not None:
+        # ---------- SINGLE CLICK (DELAYED) ----------
+        if self._click_count == 1 and self._click_window_start_ms is not None:
             if time.ticks_diff(now, self._click_window_start_ms) >= self.click_window_ms:
-                count = self._click_count
                 self._click_count = 0
                 self._click_window_start_ms = None
-                if count == 1:
-                    return "single"
-                if count == 2:
-                    return "double"
-                return "triple"
+                return "single"
 
         return None
+
 
     # Keep a compatibility alias if you want to call it poll()
     def poll(self):
@@ -198,3 +196,14 @@ class AirBuddyButton:
         if click_count == 2:
             return "double"
         return "triple"
+
+    def reset(self):
+        now=time.ticks_ms()
+        lvl=self.pin.value()
+        self._last_level=lvl
+        self._stable_level=lvl
+        self._last_change_ms=now
+        self._press_start_ms=None
+        self._click_count=0
+        self._click_window_start_ms=None
+

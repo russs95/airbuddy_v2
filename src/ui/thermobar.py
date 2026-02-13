@@ -157,23 +157,16 @@ class ThermoBar:
 
     def draw(self, x=None, y=None, w=None, h=None, p=None,
              outline=True, clear_bg=True,
-             mode="left", indicator_p=None):
+             mode="left", indicator_p=None, indicator_ps=None):
         """
         Draw the bar.
 
-        Args:
-          x,y,w,h: optional geometry overrides
-          p: progress in [0..1]
-          outline: draw the rounded border
-          clear_bg: clears bar region first
-          mode:
-            - "left"   : fill from left → right (default)
-            - "center" : fill expands from center (breathing style)
-          indicator_p:
-            - if provided (0..1), draw a thin tick marking that position
+        indicator_p:
+          - single tick position in [0..1]
 
-        Backwards compatibility:
-          You can still call draw(x, y, w, p, ...) via keyword use.
+        indicator_ps:
+          - optional list/tuple of tick positions in [0..1]
+          - drawn AFTER fill/outline so they remain visible
         """
         fb = self._fb()
         if fb is None:
@@ -200,20 +193,15 @@ class ThermoBar:
 
         inner_x, inner_y, inner_w, inner_h = self._inner_geom(x, y, w, h)
 
-        # Compute fill geometry
         fill_w = int(inner_w * p)
         if fill_w <= 0:
-            # still may draw indicator
             fill_w = 0
 
         if mode == "center":
-            # fill centered: compute start from center
             fx = inner_x + (inner_w - fill_w) // 2
         else:
-            # default: fill from left
             fx = inner_x
 
-        # Dither fill
         if fill_w > 0:
             for yy in range(inner_y, inner_y + inner_h):
                 for xx in range(fx, fx + fill_w):
@@ -221,30 +209,40 @@ class ThermoBar:
                     if on:
                         self._pixel(xx, yy, True)
 
-            # Solid leading edges:
-            # - left mode: only the moving edge
-            # - center mode: both moving edges look better
             if mode == "center":
-                # left edge
                 self._vline(fx, inner_y, inner_h, on=True)
-                # right edge
                 self._vline(fx + fill_w - 1, inner_y, inner_h, on=True)
             else:
-                # right edge (fill front)
                 lead_x = fx + fill_w - 1
                 self._vline(lead_x, inner_y, inner_h, on=True)
 
-        # Optional indicator tick
+        # ---- TICKS (draw LAST so they stay visible) ----
+        ticks = []
+
+        # single indicator_p
         if indicator_p is not None:
             try:
-                ip = float(indicator_p)
+                ticks.append(float(indicator_p))
             except Exception:
-                ip = None
-            if ip is not None:
+                pass
+
+        # multiple indicator_ps
+        if indicator_ps is not None:
+            try:
+                for ip in indicator_ps:
+                    try:
+                        ticks.append(float(ip))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        if ticks:
+            for ip in ticks:
                 ip = self._clamp(ip, 0.0, 1.0)
                 ix = inner_x + int((inner_w - 1) * ip)
-                # Draw a solid tick through the inner band
                 self._vline(ix, inner_y, inner_h, on=True)
+
 
     def draw_value(self, value, vmin, vmax,
                    x=None, y=None, w=None, h=None,

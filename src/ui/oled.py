@@ -87,6 +87,7 @@ class OLED:
         self.f_med    = ezFBfont(self.oled, fonts.MED,    fg=1, bg=0, tkey=-1)
         self.f_large  = ezFBfont(self.oled, fonts.LARGE,  fg=1, bg=0, tkey=-1)
         self.f_sym    = ezFBfont(self.oled, fonts.SYMBOLS, fg=1, bg=0, tkey=-1)
+        self.f_arvo = ezFBfont(self.oled, fonts.get("arvo"), fg=1, bg=0, tkey=-1)
 
         # Screens
         self.waiting_screen = WaitingScreen(flip_x=False, flip_y=True, gap=6)

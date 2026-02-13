@@ -13,6 +13,10 @@ class TimeScreen:
     def __init__(self, oled):
         self.oled = oled
 
+        # Colon tweak:
+        # We will hide the font ":" and draw our own colon 4px higher.
+        self.COLON_RAISE_PX = 4
+
     # ----------------------------
     # Formatting
     # ----------------------------
@@ -32,7 +36,7 @@ class TimeScreen:
             d = int(parts[0]); m = int(parts[1]); y = int(parts[2])
             if not (1 <= m <= 12 and 1 <= d <= 31):
                 return date_str
-            return f"{self.MONTHS[m-1]} {d}{self._suffix(d)}, {y}"
+            return "{} {}{}, {}".format(self.MONTHS[m - 1], d, self._suffix(d), y)
         except Exception:
             return date_str
 
@@ -52,30 +56,30 @@ class TimeScreen:
         filled = (source == "RTC")
         label = "RTC" if filled else "SYS"
 
-        # Bigger circle to match MED font
         cx = 9
-        cy = y + 8
-        r = 4  # <- bigger than before
+        cy = y + 5
+        r = 4
         draw_circle(self.oled.oled, cx, cy, r=r, filled=filled, color=1)
-
-        # Label in MED
         self.oled.f_med.write(label, 18, y)
 
     def _draw_bottom_right_temp(self, temp_c, y):
+        """
+        Draw: 25.3°C in MED, 1 decimal
+        Degree ring is pixel glyph; C is font.
+        """
         if temp_c is None:
             return
         try:
-            t = int(round(float(temp_c)))
+            t = round(float(temp_c), 1)
         except Exception:
             return
 
-        # Draw: <t> + degree ring + C  (all MED, degree drawn in pixels)
-        t_text = str(t)
+        t_text = "{:.1f}".format(t)
         w_t, _ = self.oled._text_size(self.oled.f_med, t_text)
         w_c, _ = self.oled._text_size(self.oled.f_med, "C")
 
         deg_r = 2
-        deg_w = deg_r * 2 + 1  # ~5px
+        deg_w = deg_r * 2 + 1
         total_w = w_t + 1 + deg_w + 1 + w_c
 
         x0 = max(0, self.oled.width - total_w - 2)
@@ -89,6 +93,65 @@ class TimeScreen:
         x_c = x_deg + deg_w + 1
         self.oled.f_med.write("C", x_c, y)
 
+    # ----------------------------
+    # Colon override (raise by 4px)
+    # ----------------------------
+    def _find_colon_x(self, time_str, y_time):
+        """
+        Compute x position of the first ":" in the centered LARGE time string.
+        Returns (colon_x, colon_w, text_x0) or (None, None, None).
+        """
+        if not time_str or ":" not in time_str:
+            return None, None, None
+
+        # We'll measure widths using the LARGE font.
+        # Centered string anchor:
+        w_full, _ = self.oled._text_size(self.oled.f_large, time_str)
+        x0 = max(0, (self.oled.width - int(w_full)) // 2)
+
+        idx = time_str.find(":")
+        left = time_str[:idx]
+        w_left, _ = self.oled._text_size(self.oled.f_large, left)
+
+        # width of ":" in this font (if any)
+        w_colon, _ = self.oled._text_size(self.oled.f_large, ":")
+
+        colon_x = x0 + int(w_left)
+        return int(colon_x), int(w_colon), int(x0)
+
+    def _draw_raised_colon(self, time_str, y_time):
+        """
+        Hide the font's colon (by blanking its area), then draw a 2-dot colon higher.
+        Works even if blink_off has replaced ":" with " ".
+        """
+        if not time_str or ":" not in time_str:
+            return
+
+        colon_x, colon_w, _ = self._find_colon_x(time_str, y_time)
+        if colon_x is None:
+            return
+
+        # If the font reports 0 width for ":", pick a sane default
+        if colon_w <= 0:
+            colon_w = 6
+
+        # Clear the font-colon area by filling a small rect (only inside the time band)
+        # Height guess based on LARGE font height.
+        _, h_large = self.oled._text_size(self.oled.f_large, "88:88")
+        self.oled.oled.fill_rect(colon_x, y_time, colon_w, int(h_large), 0)
+
+        # Draw our own raised colon (two 2x2 dots)
+        # Place around the vertical center of the LARGE glyph.
+        mid_y = y_time + int(h_large // 2)
+        dot_x = colon_x + max(0, (colon_w // 2) - 1)
+
+        raise_px = int(self.COLON_RAISE_PX)
+        self.oled.oled.fill_rect(dot_x, mid_y - 8 - raise_px, 2, 2, 1)
+        self.oled.oled.fill_rect(dot_x, mid_y + 2 - raise_px, 2, 2, 1)
+
+    # ----------------------------
+    # Render
+    # ----------------------------
     def _render(self, date_str, time_str, source="SYS", temp_c=None, blink_on=True):
         self.oled.oled.fill(0)
 
@@ -103,14 +166,22 @@ class TimeScreen:
 
         # --- Center: time (LARGE, with blinking colon) ---
         t_disp = self._blink_time(time_str, blink_on=blink_on)
-        _, h_large = self.oled._text_size(self.oled.f_large, t_disp)
 
+        # Compute vertical placement for LARGE time
+        _, h_large = self.oled._text_size(self.oled.f_large, "88:88")
         top_block = h_med + 2
         bottom_block = y_bottom - 1
         available = max(0, bottom_block - top_block)
         y_time = top_block + max(0, (available - h_large) // 2)
 
+        # Draw LARGE time
         self.oled.draw_centered(self.oled.f_large, t_disp, y_time)
+
+        # If blink is ON, we want ":" visible — but raised.
+        # If blink is OFF, the string has " " and we do nothing.
+        if blink_on and time_str and (":" in time_str):
+            # Use the original time_str (with colon) to compute colon placement.
+            self._draw_raised_colon(time_str, y_time)
 
         # --- Bottom-left/source + bottom-right/temp ---
         self._draw_bottom_left_source(source, y_bottom)
@@ -125,7 +196,7 @@ class TimeScreen:
         self._render(date_str, time_str, source=source, temp_c=temp_c, blink_on=True)
 
     # ----------------------------
-    # Public: live show with blink + optional "hold until click"
+    # Public: live show with blink + exit on click
     # ----------------------------
     def show_live(
             self,
@@ -139,42 +210,18 @@ class TimeScreen:
             refresh_every_blinks=2
     ):
         """
-        Live time screen with blinking ":".
-        - Updates display every blink_ms (default 500ms).
-        - Refreshes date/time/temp every N blinks (default 2 => 1s refresh).
+        Live time screen:
+          - Blinks every blink_ms
+          - Refreshes data every refresh_every_blinks blinks
+          - Exits immediately on ANY click (single/double/triple/debug) if btn provided
 
-        Holding indefinitely:
-        - Only if we can poll button non-blocking.
-        - If we can't, we fall back to max_seconds and return.
-
-        btn: your AirBuddyButton instance (optional)
+        Fix for "can't exit":
+          - Uses btn.poll_action() explicitly (non-blocking)
+          - Polls during the wait loop so clicks are never missed
         """
         start = time.ticks_ms()
         blink_on = True
         blink_count = 0
-
-        # Determine if we can non-blocking check for a click.
-        # We will NOT call a blocking wait_for_action() here.
-        can_poll = False
-        poll_fn = None
-
-        if btn is not None:
-            # If your button class exposes a non-blocking method, use it.
-            # Common patterns:
-            #   - btn.poll()
-            #   - btn.check()
-            #   - btn.read()
-            for name in ("poll", "check", "read", "get_action_nonblocking"):
-                if hasattr(btn, name):
-                    poll_fn = getattr(btn, name)
-                    can_poll = True
-                    break
-
-        # If we can't poll, do NOT hold indefinitely
-        if not can_poll:
-            hold_forever = False
-        else:
-            hold_forever = (max_seconds is None) or (max_seconds <= 0)
 
         # Prime values
         date_str = get_date_str()
@@ -182,12 +229,13 @@ class TimeScreen:
         source = get_source()
         temp_c = get_temp_c()
 
+        # If user wants hold-forever, max_seconds <= 0
+        hold_forever = (max_seconds is None) or (max_seconds <= 0)
+
         while True:
-            # Toggle blink
             blink_on = not blink_on
             blink_count += 1
 
-            # Refresh values every N blinks (e.g. every 1s if blink=500ms, N=2)
             if blink_count % max(1, int(refresh_every_blinks)) == 0:
                 date_str = get_date_str()
                 time_str = get_time_str()
@@ -196,19 +244,18 @@ class TimeScreen:
 
             self._render(date_str, time_str, source=source, temp_c=temp_c, blink_on=blink_on)
 
-            # Exit conditions
-            if can_poll and poll_fn:
-                try:
-                    action = poll_fn()
-                    # Any recognized action exits (single/double/debug)
-                    if action:
-                        return action
-                except Exception:
-                    # If polling fails, stop trying and revert to timed exit
-                    can_poll = False
+            # Wait for the blink interval, polling button frequently
+            wait_start = time.ticks_ms()
+            while time.ticks_diff(time.ticks_ms(), wait_start) < int(blink_ms):
+                if btn is not None:
+                    try:
+                        action = btn.poll_action()
+                        if action:
+                            return action
+                    except Exception:
+                        pass
+                time.sleep_ms(20)
 
             if not hold_forever:
                 if time.ticks_diff(time.ticks_ms(), start) >= int(max_seconds * 1000):
                     return None
-
-            time.sleep_ms(int(blink_ms))
