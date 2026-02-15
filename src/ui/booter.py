@@ -22,7 +22,7 @@ class Booter:
         self.f_ver = getattr(oled, "f_small", None)
 
         # Updated version text
-        self.version = "version 2.1.14"
+        self.version = "version 2.1.15"
 
         # Logo orientation (confirmed working)
         self.logo_flip_x = False

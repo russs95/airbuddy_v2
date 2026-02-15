@@ -48,11 +48,11 @@ class GPSScreen:
             pass
 
     # ----------------------------
-    # NMEA parsing helpers
+    # Parsing helpers
     # ----------------------------
     def _nmea_degmin_to_deg(self, s, hemi):
         try:
-            if (not s) or (not hemi):
+            if not s or not hemi:
                 return None
             dot = s.find(".")
             if dot < 0:
@@ -68,28 +68,25 @@ class GPSScreen:
             return None
 
     def _parse_rmc(self, line):
-        # $GPRMC,time,status,lat,NS,lon,EW,...
         try:
             p = line.split(",")
             if len(p) < 7:
                 return
-            status = p[2]
-            if status == "A":
+            if p[2] == "A":
                 self.last_fix = True
-            elif status == "V":
+            elif p[2] == "V":
                 self.last_fix = False
 
             if p[3] and p[4] and p[5] and p[6]:
                 lat = self._nmea_degmin_to_deg(p[3], p[4])
                 lon = self._nmea_degmin_to_deg(p[5], p[6])
-                if (lat is not None) and (lon is not None):
+                if lat is not None and lon is not None:
                     self.last_lat = lat
                     self.last_lon = lon
         except Exception:
             pass
 
     def _parse_gga(self, line):
-        # $GPGGA,time,lat,NS,lon,EW,fix,numsats,...
         try:
             p = line.split(",")
             if len(p) < 8:
@@ -99,6 +96,7 @@ class GPSScreen:
 
             if fixq and fixq != "0":
                 self.last_fix = True
+
             if sats:
                 try:
                     self.last_sats = int(sats)
@@ -108,7 +106,7 @@ class GPSScreen:
             if p[2] and p[3] and p[4] and p[5]:
                 lat = self._nmea_degmin_to_deg(p[2], p[3])
                 lon = self._nmea_degmin_to_deg(p[4], p[5])
-                if (lat is not None) and (lon is not None):
+                if lat is not None and lon is not None:
                     self.last_lat = lat
                     self.last_lon = lon
         except Exception:
@@ -121,7 +119,6 @@ class GPSScreen:
         self.last_sats = None
 
     def _consume_once(self, gps, max_ms=200):
-        # bounded read so we don't block UI forever
         try:
             t = time.ticks_ms()
             while time.ticks_diff(time.ticks_ms(), t) < int(max_ms):
@@ -139,89 +136,70 @@ class GPSScreen:
     # Drawing
     # ----------------------------
     def _draw(self):
-            o = self.oled
-            fb = o.oled
-            fb.fill(0)
+        o = self.oled
+        fb = o.oled
+        fb.fill(0)
 
-            # --- Title: "GPS" in Arvo16 ---
-            title_writer = o.f_arvo
-            self._w(title_writer, "GPS", 0, 0)
+        # Title — arvo20
+        title_writer = o.f_arvo20
+        self._w(title_writer, "GPS", 0, 0)
 
-            # Title height
-            try:
-                _, title_h = o._text_size(title_writer, "Ag")
-            except Exception:
-                title_h = 16  # safe fallback
+        try:
+            _, title_h = o._text_size(title_writer, "Ag")
+        except Exception:
+            title_h = 20
 
-            # Only 4px spacing below title
-            data_y0 = int(title_h + 4)
+        data_y0 = int(title_h + 4)
 
-            # --- Data font: MED ---
-            data_writer = o.f_med
+        data_writer = o.f_med
 
-            try:
-                _, h_med = o._text_size(data_writer, "Ag")
-            except Exception:
-                h_med = 12
+        try:
+            _, h_med = o._text_size(data_writer, "Ag")
+        except Exception:
+            h_med = 12
 
-            line_h = int(h_med + 2)
+        line_h = int(h_med + 2)
 
-            # --- Status ---
-            status = "ON" if self.enabled else "OFF"
-            self._w(data_writer, "Status: " + status, 0, data_y0)
+        y1 = data_y0
+        y2 = y1 + line_h
+        y3 = y2 + line_h
 
-            # --- LAT / LON / SATS ---
-            y1 = data_y0 + line_h
-            y2 = y1 + line_h
-            y3 = y2 + line_h
+        if self.enabled and self.last_fix and self.last_lat and self.last_lon:
+            self._w(data_writer, "LAT:{:.5f}".format(self.last_lat), 0, y1)
+            self._w(data_writer, "LON:{:.5f}".format(self.last_lon), 0, y2)
+        else:
+            self._w(data_writer, "LAT: --", 0, y1)
+            self._w(data_writer, "LON: --", 0, y2)
 
-            if self.enabled and self.last_fix and (self.last_lat is not None) and (self.last_lon is not None):
-                self._w(data_writer, "LAT:{:.5f}".format(self.last_lat), 0, y1)
-                self._w(data_writer, "LON:{:.5f}".format(self.last_lon), 0, y2)
-            else:
-                self._w(data_writer, "LAT: --", 0, y1)
-                self._w(data_writer, "LON: --", 0, y2)
+        sats = "--"
+        if self.enabled and self.last_sats is not None:
+            sats = str(int(self.last_sats))
 
-            sats = "--"
-            if self.enabled and (self.last_sats is not None):
-                try:
-                    sats = str(int(self.last_sats))
-                except Exception:
-                    sats = "--"
+        self._w(data_writer, "SATS: " + sats, 0, y3)
 
-            self._w(data_writer, "SATS: " + sats, 0, y3)
+        # Toggle only (no text)
+        self.toggle.draw(fb, on=self.enabled)
 
-            # Toggle
-            self.toggle.draw(fb, on=self.enabled)
-
-            fb.show()
-
+        fb.show()
 
     # ----------------------------
     # Public entry
     # ----------------------------
     def show_live(self, gps, btn):
         """
-        Single click: exit
-        Double click: toggle GPS on/off
-        Triple click: reserved
+        Single click: go to next settings screen (WiFi)
+        Double click: toggle GPS
         """
         btn.reset()
 
-        # Apply saved preference to hardware once on entry
         if gps:
             if self.enabled:
-                try:
-                    gps.enable()
-                except Exception:
-                    pass
+                try: gps.enable()
+                except: pass
             else:
-                try:
-                    gps.disable()
-                except Exception:
-                    pass
+                try: gps.disable()
+                except: pass
 
-        # Read once on entry if enabled (so user sees something quickly)
         if self.enabled and gps:
             self._consume_once(gps, max_ms=250)
 
@@ -231,7 +209,7 @@ class GPSScreen:
             action = btn.wait_for_action()
 
             if action == "single":
-                return
+                return "next"   # 🔥 go to WiFi screen
 
             if action == "double":
                 self.enabled = not self.enabled
@@ -239,18 +217,12 @@ class GPSScreen:
 
                 if gps:
                     if self.enabled:
-                        try:
-                            gps.enable()
-                        except Exception:
-                            pass
+                        try: gps.enable()
+                        except: pass
                         self._consume_once(gps, max_ms=300)
                     else:
-                        try:
-                            gps.disable()
-                        except Exception:
-                            pass
+                        try: gps.disable()
+                        except: pass
                         self._clear_data()
 
                 self._draw()
-
-            # triple reserved

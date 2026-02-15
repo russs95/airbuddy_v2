@@ -12,7 +12,7 @@ Semantic font roles:
 # --- Font data modules (ezFBfont compatible) ---
 
 # Symbols / blocks / extended glyphs
-from . import ezFBfont_amstrad_cpc_extended_supp_08 as SYMBOLS
+# from . import ezFBfont_amstrad_cpc_extended_supp_08 as SYMBOLS
 
 # Sans-serif text fonts
 from . import narrow7 as VSMALL
@@ -22,6 +22,7 @@ from . import mulish14 as MED
 # Serif / hero font (time, big numbers, title)
 from . import arvo24 as LARGE
 from . import arvo16 as ARVO16
+from . import arvo20 as ARVO20
 
 
 
@@ -34,10 +35,9 @@ _REGISTRY = {
     "medium": MED,
     "large": LARGE,
     "hero": LARGE,
-    "symbols": SYMBOLS,
-
     "arvo": ARVO16,
     "arvo16": ARVO16,
+    "arvo20": ARVO20,
 }
 
 

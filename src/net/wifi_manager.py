@@ -118,7 +118,7 @@ class WiFiManager:
         - Pico W often benefits from a clean disconnect before attempting connect.
         - Handles both negative (rp2) and positive status codes.
         """
-        self._last_error = ""
+
 
         if not ssid:
             self._last_error = "No SSID"
@@ -188,4 +188,5 @@ class WiFiManager:
             return self.connect(ssid, password, timeout_s=timeout_s, retry=retry - 1)
 
         return (False, "", "TIMEOUT")
+
 
