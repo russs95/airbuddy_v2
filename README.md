@@ -1,22 +1,61 @@
-| Left Side (Pins 1–20)                              | Right Side (Pins 21–40)                            |
-| -------------------------------------------------- | -------------------------------------------------- |
-| 🟩 **1** GP0 → OLED (SDA), ENS160 (SDA), RTC (SDA) | 🟦 **21** GP16                                     |
-| 🟨 **2** GP1 → OLED (SCL), ENS160 (SCL), RTC (SCL) | 🟦 **22** GP17                                     |
-| ⬛ **3** GND                                        | ⬛ **23** GND                                       |
-| ⬜ **4** GP2                                        | ⬜ **24** GP18                                      |
-| ⬜ **5** GP3                                        | ⬜ **25** GP19                                      |
-| ⬜ **6** GP4                                        | ⬜ **26** GP20                                      |
-| ⬜ **7** GP5                                        | ⬜ **27** GP21                                      |
-| ⬛ **8** GND                                        | ⬛ **28** GND                                       |
-| ⬜ **9** GP6                                        | ⬜ **29** GP22                                      |
-| ⬜ **10** GP7                                       | ⬜ **30** RUN                                       |
-| ⬜ **11** GP8                                       | ⬜ **31** GP26 ADC0                                 |
-| ⬜ **12** GP9                                       | ⬜ **32** GP27 ADC1                                 |
-| ⬛ **13** GND                                       | ⬛ **33** GND / AGND                                |
-| ⬜ **14** GP10                                      | ⬜ **34** GP28 ADC2                                 |
-| ⬜ **15** GP11                                      | ⬜ **35** ADC_VREF                                  |
-| ⬜ **16** GP12                                      | 🟥 **36** 3V3(OUT) → OLED VCC, ENS160 VCC, RTC VCC |
-| ⬜ **17** GP13                                      | ⬜ **37** 3V3_EN                                    |
-| ⬛ **18** GND                                       | ⬛ **38** GND                                       |
-| ⬜ **19** GP14                                      | ⬜ **39** VSYS                                      |
-| 🟦 **20** GP15 → Push Button                       | 🟥 **40** VBUS                                     |
+# airBuddy v2  
+**Open‑source air quality testing for one's home and community**
+
+---
+
+## Overview
+
+**airBuddy** is a small, open‑source air quality testing device.  Version 2.1 is built on a **Raspberry Pi Zero 2 W**.  
+The airBuddy let's one test and track the air quality in one's home-- and later one's community.   The project uses super inexpensive and sensor components that are available just about anywhere, so that just about anyone can put it togeter.
+
+With one press of a button, airBuddy:
+- Measures **temperature & humidity**
+- Reads **eCO₂ (equivalent CO₂)** and **TVOC (total volatile organic compounds)**
+- Estimates overall **air quality**
+- Displays the results on a compact OLED screen
+- Logs readings to a local data file for long‑term tracking
+
+The goal is simple:
+
+> **If people can measure their air, they can demand better air.**
+
+airBuddy is designed to be:
+- Affordable
+- Hackable
+- Community‑deployable
+- Fully open source
+
+
+
+## AirBuddy Roadmap
+
+A quick snapshot of where AirBuddy has been — and where it’s heading next.
+
+- ✅ **AirBuddy 1.0 — Raspberry Pi Zero**  
+  First working prototype. Proof of concept achieved.
+
+- ❌ **AirBuddy 2.0 — ESP32**  
+  Attempted redesign. Architecture and constraints didn’t hold up.
+
+- 🚧 **AirBuddy 2.1 — Raspberry Pi Pico**  
+  Current active build. Modular sensors, cleaner power, tighter firmware.
+
+- ✅ **AirBuddy 3D-Printed Casing**  
+  Functional enclosure completed and tested.
+
+- 🚧 **AirBuddy Wooden Casing**  
+  Handcrafted, natural-material enclosure in development.
+
+- ⏭ **AirBuddy 2.2 — ESP32 (Revisited)**  
+  Planned revisit with lessons learned from Pico architecture.
+
+- 🟡 **air.earthen.io API — Data Logging & Sync**  
+  Backend logging system initiated; schema and endpoints underway.
+
+- 🟡 **air.earthen.io Home Dashboard**  
+  Backend logging system initiated; schema and endpoints underway.
+
+- 🟡 **air.earthen.io Community Dashboard**  
+  Backend logging system initiated; schema and endpoints underway.
+
+
