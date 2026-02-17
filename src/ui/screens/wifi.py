@@ -2,7 +2,7 @@
 
 import time
 from src.ui.toggle import ToggleSwitch
-from src.app.config import load_config, save_config
+from config import load_config, save_config
 from src.net.wifi_manager import WiFiManager
 
 
@@ -12,18 +12,26 @@ class WiFiScreen:
         self.toggle = ToggleSwitch(x=100, y=6, w=24, h=52)
 
         self.wifi = WiFiManager()
-        self.cfg = load_config()
 
-        self.enabled = bool(self.cfg.get("wifi_enabled", False))
-        self.ssid = self.cfg.get("wifi_ssid", "")
-        self.password = self.cfg.get("wifi_password", "")
+        # loaded on show_live()
+        self.cfg = {}
+        self.enabled = False
+        self.ssid = ""
+        self.password = ""
 
         self._last_status = ""
         self._last_ip = ""
+        self._last_refresh_ms = 0
 
     # ----------------------------
     # Helpers
     # ----------------------------
+    def _reload_cfg(self):
+        self.cfg = load_config()
+        self.enabled = bool(self.cfg.get("wifi_enabled", False))
+        self.ssid = self.cfg.get("wifi_ssid", "") or ""
+        self.password = self.cfg.get("wifi_password", "") or ""
+
     def _masked_pw(self):
         return "********" if self.password else ""
 
@@ -31,25 +39,38 @@ class WiFiScreen:
         """
         Attempts a single blocking connection using stored credentials.
         """
+        if not self.enabled:
+            self._last_status = "DISABLED"
+            self._last_ip = ""
+            return
+
         if not self.ssid:
             self._last_status = "NO SSID"
+            self._last_ip = ""
             return
 
         self._last_status = "TRYING..."
+        self._last_ip = ""
         self._draw()
 
-        ok, ip, status = self.wifi.connect(self.ssid, self.password)
+        # Use explicit timeout/retry for consistent behavior
+        ok, ip, status = self.wifi.connect(
+            self.ssid,
+            self.password,
+            timeout_s=10,
+            retry=1
+        )
 
         if ok:
-            self._last_ip = ip
+            self._last_ip = ip or ""
             self._last_status = "CONNECTED"
         else:
-            self._last_status = status
+            self._last_status = status or "FAILED"
             self._last_ip = ""
 
     def _live_update(self):
         """
-        Queries live WiFi state.
+        Queries live WiFi state and updates status text.
         """
         if not self.enabled:
             self._last_status = "DISABLED"
@@ -57,10 +78,10 @@ class WiFiScreen:
             return
 
         if self.wifi.is_connected():
-            self._last_ip = self.wifi.ip()
+            self._last_ip = self.wifi.ip() or ""
             self._last_status = "CONNECTED"
         else:
-            self._last_status = self.wifi.status_text()
+            self._last_status = self.wifi.status_text() or "DISCONNECTED"
             self._last_ip = ""
 
     # ----------------------------
@@ -117,19 +138,28 @@ class WiFiScreen:
         """
 
         btn.reset()
+        self._reload_cfg()
 
         # Apply stored enabled state
         if self.enabled:
             self.wifi.active(True)
-            # Auto-test connection if already enabled
             self._attempt_connect()
         else:
             self.wifi.active(False)
             self._last_status = "DISABLED"
+            self._last_ip = ""
 
         self._draw()
+        self._last_refresh_ms = time.ticks_ms()
 
         while True:
+            # Periodic refresh so status updates if WiFi drops/recovers
+            now = time.ticks_ms()
+            if time.ticks_diff(now, self._last_refresh_ms) > 500:
+                self._last_refresh_ms = now
+                self._live_update()
+                self._draw()
+
             action = btn.wait_for_action()
 
             if action == "single":

@@ -9,7 +9,7 @@ class AirBuddyButton:
 
     Features:
       - Long-press debug escape (default: 2s)
-      - Single / double / triple click
+      - Single / double / triple / quad click
       - Debounced
       - REPL-safe
       - Non-blocking poll_action() for animated screens
@@ -18,7 +18,7 @@ class AirBuddyButton:
     def __init__(
             self,
             gpio_pin=15,
-            click_window_s=1.0,
+            click_window_s=0.8,   # tighter feels better for 3/4 clicks
             debounce_ms=50,
             debug_hold_ms=2000,
     ):
@@ -62,7 +62,7 @@ class AirBuddyButton:
             time.sleep_ms(5)
 
     # --------------------------------------------------
-    # NEW: Non-blocking event poll
+    # Non-blocking event poll
     # --------------------------------------------------
 
     def poll_action(self):
@@ -70,12 +70,12 @@ class AirBuddyButton:
         Non-blocking.
 
         Returns:
-          "debug", "single", "double", "triple" or None
+          "debug", "single", "double", "triple", "quad" or None
 
         Behavior:
-          - debug: emitted while held
-          - double/triple: emitted immediately on release
-          - single: emitted when click window expires
+          - debug: emitted once when held >= debug_hold_ms
+          - clicks: counted on release; emitted when click window expires
+          - quad: emitted immediately at 4th click (no need to wait)
         """
         now = time.ticks_ms()
         level = self.pin.value()
@@ -107,34 +107,37 @@ class AirBuddyButton:
                                 self._click_window_start_ms = now
                             self._click_count += 1
 
-                            # 🔥 IMMEDIATE EMIT FOR DOUBLE / TRIPLE
-                            if self._click_count == 2:
+                            # Emit quad immediately (easter egg)
+                            if self._click_count >= 4:
                                 self._click_count = 0
                                 self._click_window_start_ms = None
-                                return "double"
-
-                            if self._click_count >= 3:
-                                self._click_count = 0
-                                self._click_window_start_ms = None
-                                return "triple"
+                                return "quad"
 
         # ---------- DEBUG HOLD ----------
         if self._stable_level == 0 and self._press_start_ms is not None:
             if time.ticks_diff(now, self._press_start_ms) >= self.debug_hold_ms:
+                # emit debug once per hold
                 self._press_start_ms = None
                 self._click_count = 0
                 self._click_window_start_ms = None
                 return "debug"
 
-        # ---------- SINGLE CLICK (DELAYED) ----------
-        if self._click_count == 1 and self._click_window_start_ms is not None:
+        # ---------- EMIT CLICK COUNT WHEN WINDOW EXPIRES ----------
+        if self._click_count > 0 and self._click_window_start_ms is not None:
             if time.ticks_diff(now, self._click_window_start_ms) >= self.click_window_ms:
+                n = self._click_count
                 self._click_count = 0
                 self._click_window_start_ms = None
-                return "single"
+
+                if n == 1:
+                    return "single"
+                if n == 2:
+                    return "double"
+                if n == 3:
+                    return "triple"
+                return "quad"
 
         return None
-
 
     # Keep a compatibility alias if you want to call it poll()
     def poll(self):
@@ -144,7 +147,7 @@ class AirBuddyButton:
         return self.poll_action()
 
     # --------------------------------------------------
-    # Blocking API (unchanged behavior)
+    # Blocking API
     # --------------------------------------------------
 
     def wait_for_action(self):
@@ -152,7 +155,7 @@ class AirBuddyButton:
         Blocking call.
 
         Returns:
-            "debug", "single", "double", "triple"
+            "debug", "single", "double", "triple", "quad"
         """
 
         # --- Wait for first press (block) ---
@@ -177,7 +180,7 @@ class AirBuddyButton:
         click_count = 1
         start = time.ticks_ms()
 
-        while click_count < 3:
+        while click_count < 4:
             elapsed = time.ticks_diff(time.ticks_ms(), start)
             remaining = self.click_window_ms - elapsed
             if remaining <= 0:
@@ -195,15 +198,20 @@ class AirBuddyButton:
             return "single"
         if click_count == 2:
             return "double"
-        return "triple"
+        if click_count == 3:
+            return "triple"
+        return "quad"
 
     def reset(self):
-        now=time.ticks_ms()
-        lvl=self.pin.value()
-        self._last_level=lvl
-        self._stable_level=lvl
-        self._last_change_ms=now
-        self._press_start_ms=None
-        self._click_count=0
-        self._click_window_start_ms=None
-
+        """
+        Reset internal click/debounce state.
+        Call when entering a new screen.
+        """
+        now = time.ticks_ms()
+        lvl = self.pin.value()
+        self._last_level = lvl
+        self._stable_level = lvl
+        self._last_change_ms = now
+        self._press_start_ms = None
+        self._click_count = 0
+        self._click_window_start_ms = None

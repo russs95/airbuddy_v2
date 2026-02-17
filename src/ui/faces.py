@@ -101,46 +101,28 @@ def _star_eye(fb, w, h, cx, cy, size=3, thick=2, c=1):
 
 
 # ------------------------------------------------------------
-# NEW: circular arc mouth (clean OLED look)
+# Circular arc mouth (clean OLED look)
 # ------------------------------------------------------------
-
 def _mouth_arc(fb, w, h, cx, cy, radius, angle_span_deg=40, facing="up", thick=2, c=1):
     """
-    Draw a short circular arc for a mouth.
-
     facing:
-      - "up"   => smile (corners lower than middle)
-      - "down" => frown (corners higher than middle)
-
-    Uses shallow circular approximation.
+      - "up"   => smile (∪): middle LOWEST (largest y) on screen
+      - "down" => frown (∩): middle HIGHEST (smallest y) on screen
     """
-
     radius = max(6, int(radius))
-
-    # Increase span from ~30° to ~40°
-    # Wider arc = larger half_span
-    half_span = max(8, int(radius * 0.75))  # was ~0.55 before
-
-    # Sagitta controls how deep the curve is
+    half_span = max(8, int(radius * 0.75))
     sag = max(3, int(radius * 0.22))
 
     for dx in range(-half_span, half_span + 1):
-        # Parabolic approximation of shallow circular segment
         y_off = int((dx * dx) * sag / max(1, (half_span * half_span)))
 
         if facing == "up":
-            # Smile (∪): middle LOWEST (largest y) on screen
             yy = cy + sag - y_off
         else:
-            # Frown (∩): middle HIGHEST (smallest y) on screen
             yy = cy - sag + y_off
 
-
-        # Thickness
         for t in range(thick):
             _pix(fb, w, h, cx + dx, yy + t - (thick // 2), c)
-
-
 
 
 def _mouth_flat(fb, w, h, cx, cy, w_half, thick=2, c=1):
@@ -165,6 +147,68 @@ def _mouth_frown_legacy(fb, w, h, cx, cy, w_half, curve, thick=2, c=1):
             _pix(fb, w, h, cx + dx, yy + 1, c)
 
 
+# ------------------------------------------------------------
+# NEW: "D" grin mouth
+# ------------------------------------------------------------
+def _mouth_grin_d(fb, w, h, cx, cy, w_half, h_half, thick=2, c=1):
+    """
+    Draw a "D"-like grin:
+      - open on the LEFT
+      - vertical stroke on the RIGHT
+      - rounded top/bottom via semicircle on right side
+    """
+
+    w_half = max(6, int(w_half))
+    h_half = max(4, int(h_half))
+
+    # Bounding box for the grin
+    x_left = cx - w_half
+    x_right = cx + w_half
+    y_top = cy - h_half
+    y_bot = cy + h_half
+
+    # Vertical stroke on the right (the straight part of "D")
+    for t in range(thick):
+        _vline(fb, w, h, x_right + t, y_top, (y_bot - y_top) + 1, c)
+
+    # Rounded right edge: draw a semicircle centered near the right stroke
+    # Use radius = h_half and center x slightly left of the stroke.
+    r = h_half
+    arc_cx = x_right
+    arc_cy = cy
+
+    # semicircle on the RIGHT side only (dx >= 0)
+    # We can approximate by plotting points of a circle outline but keep only dx >= 0.
+    x = r
+    y = 0
+    err = 0
+    while x >= y:
+        pts = (
+            ( x,  y), ( y,  x),
+            ( x, -y), ( y, -x),
+        )
+        for dx, dy in pts:
+            if dx >= 0:
+                for t in range(thick):
+                    _pix(fb, w, h, arc_cx + dx + t, arc_cy + dy, c)
+
+        y += 1
+        err += 1 + 2 * y
+        if 2 * (err - x) + 1 > 0:
+            x -= 1
+            err += 1 - 2 * x
+
+    # Top and bottom horizontal strokes (like the "D" cap), extending to the left
+    for t in range(thick):
+        _hline(fb, w, h, x_left, y_top + t, (x_right - x_left), c)
+        _hline(fb, w, h, x_left, y_bot - t, (x_right - x_left), c)
+
+    # Optional: tiny "mouth corner" hint on left (keeps it clearly a grin, not a box)
+    # A couple pixels to soften the open edge.
+    _pix(fb, w, h, x_left, cy - 1, c)
+    _pix(fb, w, h, x_left, cy + 1, c)
+
+
 def draw_face(fb, width, height, mood, *, right_edge=True, fill_height_ratio=0.90):
     r = int((height * float(fill_height_ratio)) / 2)
     r = max(10, min(r, (height // 2) - 2))
@@ -187,8 +231,20 @@ def draw_face(fb, width, height, mood, *, right_edge=True, fill_height_ratio=0.9
     if mood == "star":
         _star_eye(fb, width, height, lx, eye_y, size=3, thick=eye_thick, c=1)
         _star_eye(fb, width, height, rx, eye_y, size=3, thick=eye_thick, c=1)
-        # keep a smile arc for star too (looks great)
         _mouth_arc(fb, width, height, cx, mouth_y, radius=int(r * 0.55), facing="up", thick=3, c=1)
+
+    elif mood == "grin":
+        # dot eyes + "D" grin
+        _dot_eye(fb, width, height, lx, eye_y, size=3, c=1)
+        _dot_eye(fb, width, height, rx, eye_y, size=3, c=1)
+        _mouth_grin_d(
+            fb, width, height,
+            cx, mouth_y,
+            w_half=int(r * 0.42),
+            h_half=max(4, int(r * 0.20)),
+            thick=mouth_thick,
+            c=1
+        )
 
     elif mood == "good":
         _dot_eye(fb, width, height, lx, eye_y, size=3, c=1)
