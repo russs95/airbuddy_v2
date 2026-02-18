@@ -7,10 +7,16 @@
 # - Persist "last sent" timestamp for Logging screen
 # - Expose queue size + last sent helpers for UI
 #
+# FIX (Feb 2026):
+# - AirSensor.read_quick() returns AirReading (object), NOT dict.
+#   So build_values() must support attribute-style readings.
+# - Re-enable real-data gate to stop DB spam.
+# - Skip read_quick if sampling/warmup is in progress (avoid I2C collisions).
+#
 # RAM NOTES (Pico W):
-# - Avoid importing heavy modules at top-level
-# - Avoid json.load/json.dump when possible (use ujson, lazy import)
-# - Avoid list(reading.keys()) (allocates)
+# - Avoid heavy imports at top-level
+# - Prefer ujson lazily
+# - Avoid list(keys) allocations
 # - gc.collect() after file/network work
 
 import time
@@ -52,6 +58,10 @@ class TelemetryScheduler:
         self._next_send_ms = time.ticks_add(time.ticks_ms(), 3000)
         self._last_reading = None
 
+        # Debug throttling
+        self._dbg_every_n = 1
+        self._dbg_count = 0
+
     # ----------------------------
     # Public UI helpers
     # ----------------------------
@@ -71,7 +81,6 @@ class TelemetryScheduler:
         j = _json()
         try:
             with open(LAST_SENT_FILE, "w") as f:
-                # keep it tiny
                 j.dump({"ts": int(ts), "ok": bool(ok)}, f)
         except Exception:
             pass
@@ -80,10 +89,6 @@ class TelemetryScheduler:
 
     @staticmethod
     def queue_size():
-        """
-        Reads telemetry_queue.json as a list and returns its length.
-        (If TelemetryClient uses a different format, returns 0 safely.)
-        """
         j = _json()
         try:
             with open(QUEUE_FILE, "r") as f:
@@ -97,6 +102,12 @@ class TelemetryScheduler:
     # ----------------------------
     # Internal helpers
     # ----------------------------
+    def _dbg_print(self, *parts):
+        try:
+            print(*parts)
+        except Exception:
+            pass
+
     def _ensure_client(self, cfg):
         if self._client is not None:
             return self._client
@@ -108,7 +119,6 @@ class TelemetryScheduler:
         device_id = (cfg.get("device_id") or "").strip()
         device_key = (cfg.get("device_key") or "").strip()
 
-        # Keep client minimal
         self._client = TelemetryClient(
             api_base=api_base,
             device_id=device_id,
@@ -122,66 +132,134 @@ class TelemetryScheduler:
         except Exception:
             return 0
 
+    def _sampling_in_progress(self):
+        """
+        Avoid telemetry reads while the button sampling warmup is active.
+        This prevents I2C collisions + ENS retry loops overlapping.
+        """
+        a = self.air
+        if a is None:
+            return False
+
+        # AirSensor sets _warmup_until during begin_sampling().
+        try:
+            wu = getattr(a, "_warmup_until", None)
+            if wu is not None:
+                # warmup is active until it expires (finish_sampling clears it)
+                try:
+                    if time.ticks_diff(time.ticks_ms(), wu) < 0:
+                        return True
+                except Exception:
+                    return True
+        except Exception:
+            pass
+
+        # If AirSensor provides is_ready(), treat "not ready" as "sampling in progress"
+        try:
+            if hasattr(a, "is_ready") and callable(a.is_ready):
+                if not a.is_ready():
+                    return True
+        except Exception:
+            pass
+
+        return False
+
     def _build_values(self, reading, rtc_temp_c=None):
         """
-        Convert AirSensor reading dict into compact values.
-        Keep tolerant to key name changes.
+        Convert reading into compact dict values.
+
+        Supports:
+        - dict readings (legacy/other sensors)
+        - AirReading objects (your AirSensor.read_quick / finish_sampling)
         """
-        if not isinstance(reading, dict):
-            return {"note": "no_reading"}
-
-        def g(*keys):
-            for k in keys:
-                try:
-                    v = reading.get(k, None)
-                except Exception:
-                    v = None
-                if v is not None:
-                    return v
-            return None
-
         values = {}
 
-        eco2 = g("eco2", "eCO2", "eco2_ppm", "co2_ppm", "co2")
-        tvoc = g("tvoc", "tvoc_ppb")
-        temp = g("temp_c", "temperature_c", "t_c")
-        rh = g("rh", "humidity", "humidity_rh", "rh_pct")
+        # 1) AirReading/object path (preferred)
+        if reading is not None and (not isinstance(reading, dict)):
+            # Pull known fields with getattr (no allocations)
+            try:
+                eco2 = getattr(reading, "eco2_ppm", None)
+                tvoc = getattr(reading, "tvoc_ppb", None)
+                temp = getattr(reading, "temp_c", None)
+                rh = getattr(reading, "humidity", None)
+                aqi = getattr(reading, "aqi", None)
+                ready = getattr(reading, "ready", None)
+                conf = getattr(reading, "confidence", None)
 
-        if eco2 is not None:
-            values["eco2_ppm"] = eco2
-        if tvoc is not None:
-            values["tvoc_ppb"] = tvoc
-        if temp is not None:
-            values["temp_c"] = temp
-        if rh is not None:
-            values["rh"] = rh
+                if eco2 is not None:
+                    values["eco2_ppm"] = int(eco2)
+                if tvoc is not None:
+                    values["tvoc_ppb"] = int(tvoc)
+                if temp is not None:
+                    # keep as float but tiny
+                    try:
+                        values["temp_c"] = float(temp)
+                    except Exception:
+                        pass
+                if rh is not None:
+                    try:
+                        values["rh"] = float(rh)
+                    except Exception:
+                        pass
+                if aqi is not None:
+                    try:
+                        values["aqi"] = int(aqi)
+                    except Exception:
+                        pass
+                if ready is not None:
+                    values["ready"] = bool(ready)
+                if conf is not None:
+                    try:
+                        values["confidence"] = int(conf)
+                    except Exception:
+                        pass
+            except Exception:
+                # fall through; may still try dict path below
+                pass
 
+        # 2) dict path
+        if isinstance(reading, dict):
+            def g(*keys):
+                for k in keys:
+                    try:
+                        v = reading.get(k, None)
+                    except Exception:
+                        v = None
+                    if v is not None:
+                        return v
+                return None
+
+            eco2 = g("eco2", "eCO2", "eco2_ppm", "co2_ppm", "co2")
+            tvoc = g("tvoc", "tvoc_ppb")
+            temp = g("temp_c", "temperature_c", "t_c")
+            rh = g("rh", "humidity", "humidity_rh", "rh_pct")
+
+            if eco2 is not None:
+                values["eco2_ppm"] = eco2
+            if tvoc is not None:
+                values["tvoc_ppb"] = tvoc
+            if temp is not None:
+                values["temp_c"] = temp
+            if rh is not None:
+                values["rh"] = rh
+
+        # RTC temperature (optional)
         if rtc_temp_c is not None:
             try:
                 values["rtc_temp_c"] = float(rtc_temp_c)
             except Exception:
                 pass
 
-        # If we still have nothing, do a bounded, no-list fallback.
-        # (Avoids list(reading.keys()) allocations.)
+        # If still empty, mark as placeholder (used by gate)
         if not values:
-            n = 0
-            try:
-                for k in reading:
-                    v = reading.get(k)
-                    if isinstance(v, (int, float, str, bool)) or v is None:
-                        values[k] = v
-                        n += 1
-                    if n >= 12:
-                        break
-            except Exception:
-                pass
+            values["note"] = "no_reading"
 
         return values
 
     def _values_has_real_data(self, values):
         """
-        True if values contains at least one actual numeric sensor reading.
+        True if values contains at least one actual numeric sensor reading
+        AND looks meaningful (prevents DB spam).
         """
         if not isinstance(values, dict) or not values:
             return False
@@ -189,13 +267,44 @@ class TelemetryScheduler:
         if values.get("note") == "no_reading":
             return False
 
-        real_keys = ("eco2_ppm", "tvoc_ppb", "temp_c", "rh", "pm25", "pm10", "aqi")
-        for k in real_keys:
-            v = values.get(k)
-            if isinstance(v, (int, float)) and v is not None:
-                return True
+        # If ready flag exists and is False => skip
+        if ("ready" in values) and (not bool(values.get("ready"))):
+            return False
+
+        # Must have at least one meaningful numeric key
+        eco2 = values.get("eco2_ppm", None)
+        tvoc = values.get("tvoc_ppb", None)
+        temp = values.get("temp_c", None)
+        rh = values.get("rh", None)
+
+        # eco2: must be > 0
+        if isinstance(eco2, (int, float)) and eco2 > 0:
+            return True
+
+        # tvoc: allow >=0 (but require some other signal if 0)
+        if isinstance(tvoc, (int, float)) and tvoc > 0:
+            return True
+
+        # temp/rh alone are allowed, but only if they look sane
+        if isinstance(temp, (int, float)) and (-20.0 <= float(temp) <= 80.0):
+            return True
+        if isinstance(rh, (int, float)) and (0.0 <= float(rh) <= 100.0):
+            return True
 
         return False
+
+    def _dbg_values_sample(self, values, max_items=5):
+        if not isinstance(values, dict):
+            return
+        n = 0
+        try:
+            for k in values:
+                self._dbg_print("telemetry: val", k, "=", values.get(k))
+                n += 1
+                if n >= int(max_items):
+                    break
+        except Exception:
+            pass
 
     # ----------------------------
     # Main tick
@@ -203,9 +312,6 @@ class TelemetryScheduler:
     def tick(self, cfg, rtc_dict=None):
         """
         Call frequently from the main loop.
-
-        cfg: dict from load_config()
-        rtc_dict: rtc info dict (optional)
         """
         if not cfg or not cfg.get("telemetry_enabled", True):
             return
@@ -214,7 +320,7 @@ class TelemetryScheduler:
         if time.ticks_diff(now, self._next_send_ms) < 0:
             return
 
-        # Schedule next send FIRST (prevents hammering on failures)
+        # Schedule next send FIRST
         try:
             interval_s = int(cfg.get("telemetry_post_every_s", 120) or 120)
         except Exception:
@@ -224,21 +330,40 @@ class TelemetryScheduler:
 
         self._next_send_ms = time.ticks_add(now, interval_s * 1000)
 
+        # Debug: due
+        self._dbg_count += 1
+        do_print = (self._dbg_count % int(self._dbg_every_n)) == 0
+        if do_print:
+            self._dbg_print("telemetry: DUE interval_s=", interval_s)
+
         # Must have wifi
         if self.wifi:
             try:
                 if not self.wifi.is_connected():
+                    if do_print:
+                        self._dbg_print("telemetry: skip (wifi not connected)")
                     return
             except Exception:
+                if do_print:
+                    self._dbg_print("telemetry: skip (wifi check error)")
                 return
 
-        # Grab a quick reading
+        # Skip if sampling warmup is active
+        if self._sampling_in_progress():
+            if do_print:
+                self._dbg_print("telemetry: skip (sampling in progress)")
+            return
+
+        # Grab a quick reading (AirReading object)
+        got_reading = False
         try:
             r = self.air.read_quick(source="telemetry")
             if r:
                 self._last_reading = r
-        except Exception:
-            pass
+                got_reading = True
+        except Exception as e:
+            if do_print:
+                self._dbg_print("telemetry: read_quick err", repr(e))
 
         # RTC temp (optional)
         rtc_temp_c = None
@@ -250,16 +375,26 @@ class TelemetryScheduler:
         if isinstance(rtc_dict, dict):
             rtc_temp_c = rtc_dict.get("temp_c")
 
-        values = self._build_values(self._last_reading or {}, rtc_temp_c=rtc_temp_c)
+        values = self._build_values(self._last_reading, rtc_temp_c=rtc_temp_c)
 
         recorded_at = self._now_unix_seconds()
         if recorded_at < 1000000000:
+            if do_print:
+                self._dbg_print("telemetry: skip (rtc not epoch) t=", recorded_at)
             return
 
-        # Skip placeholder/no-reading payloads
+        # ✅ REAL-DATA GATE (re-enabled)
         if not self._values_has_real_data(values):
             self.write_last_sent(recorded_at, ok=False)
+            if do_print:
+                self._dbg_print("telemetry: skip (no real data)", "reading=", "ok" if got_reading else "none")
+                self._dbg_values_sample(values, max_items=6)
             return
+
+        if do_print:
+            self._dbg_print("telemetry: sending", "reading=", "ok" if got_reading else "none",
+                            "values_len=", (len(values) if isinstance(values, dict) else 0))
+            self._dbg_values_sample(values, max_items=6)
 
         payload = {
             "recorded_at": recorded_at,
@@ -267,17 +402,20 @@ class TelemetryScheduler:
             "flags": {"auto_log": True},
         }
 
-        # Ensure client lazily
         client = self._ensure_client(cfg)
 
         ok = False
+        msg = ""
         try:
-            ok, _msg = client.send(payload)
-        except Exception:
+            ok, msg = client.send(payload)
+        except Exception as e:
             ok = False
+            msg = "EXC " + repr(e)
         finally:
-            # Always collect after a send attempt; sockets/JSON can fragment RAM.
             _gc_collect()
 
-        if ok:
-            self.write_last_sent(recorded_at, ok=True)
+        # Always update last_sent (lets UI show attempts)
+        self.write_last_sent(recorded_at, ok=bool(ok))
+
+        if do_print:
+            self._dbg_print("telemetry:", ok, msg)

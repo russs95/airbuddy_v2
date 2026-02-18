@@ -116,9 +116,12 @@ def _mouth_arc(fb, w, h, cx, cy, radius, angle_span_deg=40, facing="up", thick=2
     for dx in range(-half_span, half_span + 1):
         y_off = int((dx * dx) * sag / max(1, (half_span * half_span)))
 
+        # NOTE: OLED coordinates: larger y is lower on screen.
         if facing == "up":
+            # ✅ SMILE: center lowest (largest y)
             yy = cy + sag - y_off
         else:
+            # ✅ FROWN: center highest (smallest y)
             yy = cy - sag + y_off
 
         for t in range(thick):
@@ -148,65 +151,30 @@ def _mouth_frown_legacy(fb, w, h, cx, cy, w_half, curve, thick=2, c=1):
 
 
 # ------------------------------------------------------------
-# NEW: "D" grin mouth
+# NEW: safer OLED-friendly "grin" mouth
 # ------------------------------------------------------------
-def _mouth_grin_d(fb, w, h, cx, cy, w_half, h_half, thick=2, c=1):
+def _mouth_grin(fb, w, h, cx, cy, radius, w_half, thick=2, c=1):
     """
-    Draw a "D"-like grin:
-      - open on the LEFT
-      - vertical stroke on the RIGHT
-      - rounded top/bottom via semicircle on right side
+    A grin that reads well on SSD1306:
+      - base smile arc
+      - short inner 'teeth' line
+      - tiny corners
     """
+    radius = max(6, int(radius))
+    w_half = max(8, int(w_half))
 
-    w_half = max(6, int(w_half))
-    h_half = max(4, int(h_half))
+    # Base smile arc (slightly bigger + thicker)
+    _mouth_arc(fb, w, h, cx, cy, radius=radius, facing="up", thick=max(2, thick), c=c)
 
-    # Bounding box for the grin
-    x_left = cx - w_half
-    x_right = cx + w_half
-    y_top = cy - h_half
-    y_bot = cy + h_half
+    # Teeth line: sit a bit ABOVE the lowest part of the smile
+    # (so it doesn't collide with the arc pixels)
+    teeth_y = cy + max(1, int(radius * 0.10))
+    teeth_w = max(8, int(w_half * 1.10))
+    _hline(fb, w, h, cx - (teeth_w // 2), teeth_y, teeth_w, c)
 
-    # Vertical stroke on the right (the straight part of "D")
-    for t in range(thick):
-        _vline(fb, w, h, x_right + t, y_top, (y_bot - y_top) + 1, c)
-
-    # Rounded right edge: draw a semicircle centered near the right stroke
-    # Use radius = h_half and center x slightly left of the stroke.
-    r = h_half
-    arc_cx = x_right
-    arc_cy = cy
-
-    # semicircle on the RIGHT side only (dx >= 0)
-    # We can approximate by plotting points of a circle outline but keep only dx >= 0.
-    x = r
-    y = 0
-    err = 0
-    while x >= y:
-        pts = (
-            ( x,  y), ( y,  x),
-            ( x, -y), ( y, -x),
-        )
-        for dx, dy in pts:
-            if dx >= 0:
-                for t in range(thick):
-                    _pix(fb, w, h, arc_cx + dx + t, arc_cy + dy, c)
-
-        y += 1
-        err += 1 + 2 * y
-        if 2 * (err - x) + 1 > 0:
-            x -= 1
-            err += 1 - 2 * x
-
-    # Top and bottom horizontal strokes (like the "D" cap), extending to the left
-    for t in range(thick):
-        _hline(fb, w, h, x_left, y_top + t, (x_right - x_left), c)
-        _hline(fb, w, h, x_left, y_bot - t, (x_right - x_left), c)
-
-    # Optional: tiny "mouth corner" hint on left (keeps it clearly a grin, not a box)
-    # A couple pixels to soften the open edge.
-    _pix(fb, w, h, x_left, cy - 1, c)
-    _pix(fb, w, h, x_left, cy + 1, c)
+    # Corner hints (helps it read as "grin")
+    _pix(fb, w, h, cx - w_half, teeth_y - 1, c)
+    _pix(fb, w, h, cx + w_half, teeth_y - 1, c)
 
 
 def draw_face(fb, width, height, mood, *, right_edge=True, fill_height_ratio=0.90):
@@ -234,14 +202,13 @@ def draw_face(fb, width, height, mood, *, right_edge=True, fill_height_ratio=0.9
         _mouth_arc(fb, width, height, cx, mouth_y, radius=int(r * 0.55), facing="up", thick=3, c=1)
 
     elif mood == "grin":
-        # dot eyes + "D" grin
         _dot_eye(fb, width, height, lx, eye_y, size=3, c=1)
         _dot_eye(fb, width, height, rx, eye_y, size=3, c=1)
-        _mouth_grin_d(
+        _mouth_grin(
             fb, width, height,
             cx, mouth_y,
+            radius=int(r * 0.52),
             w_half=int(r * 0.42),
-            h_half=max(4, int(r * 0.20)),
             thick=mouth_thick,
             c=1
         )
@@ -278,5 +245,15 @@ def draw_face(fb, width, height, mood, *, right_edge=True, fill_height_ratio=0.9
             thick=mouth_thick,
             c=1
         )
-        _thick_line(fb, width, height, cx - int(r * 0.55), cy + 2, cx - int(r * 0.35), cy + 8, thickness=2, c=1)
-        _thick_line(fb, width, height, cx + int(r * 0.55), cy + 2, cx + int(r * 0.35), cy + 8, thickness=2, c=1)
+        _thick_line(
+            fb, width, height,
+            cx - int(r * 0.55), cy + 2,
+            cx - int(r * 0.35), cy + 8,
+            thickness=2, c=1
+        )
+        _thick_line(
+            fb, width, height,
+            cx + int(r * 0.55), cy + 2,
+            cx + int(r * 0.35), cy + 8,
+            thickness=2, c=1
+        )

@@ -1,22 +1,37 @@
-# main.py (device root) — AirBuddy 2.1 launcher + step-boot pipeline
-# - RTC sync (once)
-# - load config
-# - start sensor warmup (non-blocking)
-# - connect Wi-Fi
-# - device lookup: GET https://air.earthen.io/api/v1/device
-# - show assignment for 4s
-# - launch src/app/main.run(...)
+# main.py (device root) — AirBuddy 2.1 launcher
+# Boot -> Waiting -> src/app/main.run()
+#
+# Board-agnostic version:
+#  - Uses src.hal.board for I2C + GPS pins (Pico vs ESP32)
+#  - OLED class now uses HAL by default (your patched src/ui/oled.py)
 
-from machine import Pin, I2C, RTC
+from machine import RTC
 import time
+
+from src.hal.board import init_i2c, gps_pins
 
 
 # ----------------------------
-# OLED init (root-level)
+# GPS pins (match src/app/main.py)
+# ----------------------------
+GPS_UART_ID, GPS_BAUD, GPS_TX_PIN, GPS_RX_PIN = gps_pins()
+
+
+def _gc():
+    try:
+        import gc
+        gc.collect()
+    except Exception:
+        pass
+
+
+# ----------------------------
+# OLED init
 # ----------------------------
 def init_oled():
     try:
         from src.ui.oled import OLED
+        # OLED() will use HAL-selected I2C unless explicit pins are passed.
         return OLED()
     except Exception as e:
         print("OLED:init failed:", repr(e))
@@ -24,179 +39,80 @@ def init_oled():
 
 
 # ----------------------------
-# Config Loader (dict-based)
+# Config
 # ----------------------------
 def load_cfg_dict():
     try:
         from config import load_config
         return load_config()
     except Exception as e:
-        print("CONFIG: missing/invalid config.py:", repr(e))
+        print("CONFIG error:", repr(e))
         return None
 
 
 # ----------------------------
-# RTC Sync (returns rtc_info dict)
+# RTC Sync
 # ----------------------------
 def sync_rtc_from_ds3231():
-    info = {
-        "ok": False,
-        "synced": False,
-        "osf": None,
-        "temp_c": None,
-        "dt": None,
-        "ticking": None,
-        "sane": None,
-    }
+    info = {"ok": False, "synced": False, "temp_c": None}
 
     try:
-        i2c = I2C(0, scl=Pin(1), sda=Pin(0), freq=400000)
+        i2c = init_i2c()
         from src.drivers.ds3231 import DS3231
         ds = DS3231(i2c)
-
-        osf = False
-        try:
-            osf = bool(ds.lost_power())
-        except Exception:
-            osf = None
-
-        info["osf"] = osf
 
         year, month, day, weekday, hour, minute, sec = ds.datetime()
         wd0 = (weekday - 1) % 7
         RTC().datetime((year, month, day, wd0, hour, minute, sec, 0))
 
-        info["dt"] = (year, month, day, wd0, hour, minute, sec)
-
-        # temp if driver supports it
         try:
             info["temp_c"] = ds.temperature()
         except Exception:
-            info["temp_c"] = None
+            pass
 
-        info["synced"] = (osf is False) or (osf is None)
         info["ok"] = True
+        info["synced"] = True
 
-        print("RTC: synced from DS3231:", (year, month, day, hour, minute, sec))
+        print("RTC synced:", (year, month, day, hour, minute, sec))
         return True, "RTC OK", info
 
     except Exception as e:
-        print("RTC: sync failed:", repr(e))
-        info["ok"] = False
-        info["synced"] = False
+        print("RTC error:", repr(e))
         return False, "RTC FAIL", info
 
 
 # ----------------------------
-# Sensor warmup (start only)
+# API Device Lookup (LOW-RAM)
 # ----------------------------
-def start_sensor_warmup(cfg, air_sensor):
-    try:
-        warmup_s = float(cfg.get("warmup_seconds", 4.0) if cfg else 4.0)
-    except Exception:
-        warmup_s = 4.0
-
-    try:
-        air_sensor.begin_sampling(warmup_seconds=warmup_s, source="boot")
-        return True, "Warmup {:.0f}s".format(warmup_s)
-    except Exception as e:
-        return False, "Warmup err"
-
-
-# ----------------------------
-# Wi-Fi Boot Connect
-# ----------------------------
-def wifi_boot_connect(cfg):
-    info = {
-        "enabled": False,
-        "ok": False,
-        "ip": "",
-        "status": "SKIPPED",
-        "error": "",
-    }
-
-    if cfg is None:
-        info["status"] = "NO_CONFIG"
-        return False, "No config", info
-
-    WIFI_ENABLED = bool(cfg.get("wifi_enabled", True))
-    WIFI_SSID = (cfg.get("wifi_ssid", "") or "").strip()
-    WIFI_PASS = (cfg.get("wifi_password", "") or "").strip()
-
-    info["enabled"] = WIFI_ENABLED
-
-    if not WIFI_ENABLED:
-        info["status"] = "DISABLED"
-        return True, "WiFi disabled", info
-
-    if not WIFI_SSID or not WIFI_PASS:
-        info["status"] = "MISSING_CREDS"
-        info["error"] = "wifi_ssid/wifi_password not set"
-        print("WIFI: missing credentials in config.json")
-        return False, "WiFi creds missing", info
-
-    try:
-        from src.net.wifi_manager import WiFiManager
-        wifi = WiFiManager()
-
-        ok, ip, status = wifi.connect(WIFI_SSID, WIFI_PASS, timeout_s=10, retry=1)
-
-        info["ok"] = bool(ok)
-        info["ip"] = ip or ""
-        info["status"] = status or ("CONNECTED" if ok else "FAILED")
-        info["error"] = wifi.last_error() or ""
-
-        if ok:
-            print("WIFI: connected:", info["ip"])
-            return True, "WiFi connected", info
-        else:
-            print("WIFI: not connected:", info["status"], info["error"])
-            return False, "WiFi fail", info
-
-    except Exception as e:
-        info["status"] = "ERROR"
-        info["error"] = repr(e)
-        print("WIFI: boot connect error:", info["error"])
-        return False, "WiFi error", info
-
-
-# ----------------------------
-# API: device lookup (OMEM-safe)
-# ----------------------------
-def api_boot_device_lookup(cfg, wifi_info):
+def api_device_lookup(cfg):
     info = {
         "ok": False,
-        "status": "SKIPPED",
-        "error": "",
         "device_name": "",
         "home_name": "",
         "room_name": "",
         "community_name": "",
     }
 
-    if not isinstance(wifi_info, dict) or not wifi_info.get("ok"):
-        info["status"] = "NO_WIFI"
-        return False, "No WiFi", info
-
-    if cfg is None:
-        info["status"] = "NO_CONFIG"
+    if not cfg:
         return False, "No config", info
 
-    device_id = (cfg.get("device_id", "") or "").strip()
-    device_key = (cfg.get("device_key", "") or "").strip()
-
+    device_id = (cfg.get("device_id") or "").strip()
+    device_key = (cfg.get("device_key") or "").strip()
     if not device_id or not device_key:
-        info["status"] = "NO_DEVICE_KEYS"
-        info["error"] = "device_id/device_key missing"
         return False, "No device keys", info
 
-    url = "https://air.earthen.io/api/v1/device?compact=1"
+    url = (cfg.get("api_base") or "http://air.earthen.io").rstrip("/") + "/api/v1/device?compact=1"
 
+    r = None
     try:
-        import gc
-        import ujson
+        _gc()
+
+        try:
+            import ujson as json
+        except Exception:
+            import json
+
         import urequests
-        gc.collect()
 
         headers = {
             "X-Device-Id": device_id,
@@ -211,44 +127,14 @@ def api_boot_device_lookup(cfg, wifi_info):
             r = urequests.get(url, headers=headers)
 
         code = getattr(r, "status_code", None)
-        info["status"] = str(code) if code is not None else "NO_STATUS"
+        if code != 200:
+            return False, "HTTP {}".format(code if code is not None else "?"), info
 
-        try:
-            text = r.text
-        except Exception:
-            text = None
+        # STREAM PARSE (no r.text)
+        data = json.load(r.raw)
 
-        try:
-            r.close()
-        except Exception:
-            pass
-
-        del r
-        gc.collect()
-
-        if not text:
-            info["ok"] = False
-            info["status"] = "NO_BODY"
-            info["error"] = "empty response"
-            return False, "API empty", info
-
-        try:
-            data = ujson.loads(text)
-        except Exception as e:
-            info["ok"] = False
-            info["status"] = "BAD_JSON"
-            info["error"] = "json parse: " + repr(e)
-            return False, "API bad json", info
-        finally:
-            del text
-            gc.collect()
-
-        ok = bool(isinstance(data, dict) and data.get("ok"))
-        info["ok"] = ok
-
-        if not ok:
-            info["error"] = "not-ok"
-            return False, "API fail", info
+        if not isinstance(data, dict) or not data.get("ok"):
+            return False, "API not ok", info
 
         dev = data.get("device") or {}
         asg = data.get("assignment") or {}
@@ -256,102 +142,130 @@ def api_boot_device_lookup(cfg, wifi_info):
         room = asg.get("room") or {}
         com = asg.get("community") or {}
 
-        info["device_name"] = str(dev.get("device_name") or "").strip()
-        info["home_name"] = str(home.get("home_name") or "").strip()
-        info["room_name"] = str(room.get("room_name") or "").strip()
-        info["community_name"] = str(com.get("com_name") or "").strip()
+        info["device_name"] = str(dev.get("device_name") or "")
+        info["home_name"] = str(home.get("home_name") or "")
+        info["room_name"] = str(room.get("room_name") or "")
+        info["community_name"] = str(com.get("com_name") or "")
 
-        del data
-        gc.collect()
+        info["ok"] = True
+        return True, "device confirmed", info
 
-        return True, "API OK", info
+    except MemoryError:
+        return False, "ENOMEM", info
 
     except Exception as e:
-        info["status"] = "ERROR"
-        info["error"] = repr(e)
-        print("API: lookup error:", info["error"])
-        return False, "API error", info
+        print("API error:", repr(e))
+        return False, "API FAIL", info
+
+    finally:
+        if r:
+            try:
+                r.close()
+            except Exception:
+                pass
+        _gc()
 
 
 # ----------------------------
-# Assignment splash screen (4s)
+# GPS check (end of boot)
 # ----------------------------
-def show_assignment(oled, api_info, ms=4000):
+def gps_boot_check(cfg):
+    """
+    Lightweight GPS presence check so WaitingScreen can show GPS status.
+    We do NOT keep the GPS object; src/app/main.py will init it for real.
+    """
+    info = {"ok": False, "enabled": False}
+
+    try:
+        enabled = bool(cfg and cfg.get("gps_enabled", False))
+    except Exception:
+        enabled = False
+
+    info["enabled"] = enabled
+
+    if not enabled:
+        info["ok"] = True
+        return True, "GPS off", info
+
+    gps = None
+    try:
+        _gc()
+        from src.app.gps_init import init_gps
+        gps = init_gps(
+            uart_id=GPS_UART_ID,
+            baud=GPS_BAUD,
+            tx_pin=GPS_TX_PIN,
+            rx_pin=GPS_RX_PIN
+        )
+        ok = gps is not None
+        info["ok"] = bool(ok)
+        return bool(ok), ("GPS OK" if ok else "GPS missing"), info
+    except Exception:
+        info["ok"] = False
+        return False, "GPS missing", info
+    finally:
+        try:
+            gps = None
+        except Exception:
+            pass
+        _gc()
+
+
+# ----------------------------
+# Waiting Screen
+# ----------------------------
+def go_waiting(oled, wifi_boot=None, api_boot=None, gps_boot=None):
     if oled is None:
         return
-    if not isinstance(api_info, dict) or not api_info.get("ok"):
-        return
-
-    fb = oled.oled
-    fb.fill(0)
-
-    f = getattr(oled, "f_med", None) or getattr(oled, "f_arvo16", None) or getattr(oled, "f_small", None)
-    if not f:
-        return
-
-    # Four lines max on 64px height (med is usually 12-14px tall)
-    device = api_info.get("device_name") or "AirBuddy"
-    home = api_info.get("home_name") or ""
-    room = api_info.get("room_name") or ""
-    com = api_info.get("community_name") or ""
-
-    lines = [
-        device,
-        (home + (" / " + room if room else "")).strip(" /"),
-        com,
-        "Locked & loaded!",
-    ]
-
-    y = 2
-    for s in lines:
-        s = str(s)
-        if len(s) > 20:
-            s = s[:20]
-        try:
-            oled.draw_centered(f, s, y)
-        except Exception:
-            f.write(s, 0, y)
-        y += 15
-
-    fb.show()
-    time.sleep_ms(int(ms))
+    try:
+        from src.ui.waiting import WaitingScreen
+        scr = WaitingScreen()
+        scr.show(
+            oled,
+            line="Know your air...",
+            animate=False,
+            wifi_ok=bool(isinstance(wifi_boot, dict) and wifi_boot.get("ok")),
+            gps_on=bool(isinstance(gps_boot, dict) and gps_boot.get("enabled") and gps_boot.get("ok")),
+            api_ok=bool(isinstance(api_boot, dict) and api_boot.get("ok")),
+        )
+    except Exception as e:
+        print("WAITING error:", repr(e))
 
 
-# ----------------------------
-# Root boot sequence using Booter pipeline
-# ----------------------------
+# ============================================================
+# BOOT SEQUENCE
+# ============================================================
 oled = init_oled()
 
 cfg = None
 rtc_info = None
 wifi_boot = None
 api_boot = None
+gps_boot = None
 
 air = None
 try:
     from src.sensors.air import AirSensor
     air = AirSensor()
 except Exception as e:
-    print("AIR: init failed:", repr(e))
-    air = None
+    print("AIR init failed:", repr(e))
 
 try:
     from src.ui.booter import Booter
     booter = Booter(oled) if oled else None
-except Exception as e:
-    print("BOOTER:init failed:", repr(e))
+except Exception:
     booter = None
+
 
 def _log(msg):
     print(msg)
 
-# Build pipeline steps (label, fn)
-steps = []
 
 def step_load_config():
     global cfg
     cfg = load_cfg_dict()
-    return (cfg is not None), ("Config OK" if cfg is not None else "Config FAIL")
+    return (cfg is not None), ("Config OK" if cfg else "Config FAIL")
+
 
 def step_rtc():
     global rtc_info
@@ -359,47 +273,104 @@ def step_rtc():
     rtc_info = info
     return ok, detail
 
+
 def step_warmup():
     if air is None:
         return False, "No air sensor"
-    return start_sensor_warmup(cfg, air)
+    # root boot only *starts* warmup; src/app/main.py will finish sampling later
+    try:
+        warmup_s = float(cfg.get("warmup_seconds", 4.0) if cfg else 4.0)
+    except Exception:
+        warmup_s = 4.0
+
+    try:
+        air.begin_sampling(warmup_seconds=warmup_s, source="boot")
+        return True, "Warmup {:.0f}s".format(warmup_s)
+    except Exception:
+        return False, "Warmup err"
+
 
 def step_wifi():
     global wifi_boot
-    ok, detail, info = wifi_boot_connect(cfg)
-    wifi_boot = info
-    return ok, detail
+    wifi_boot = {"ok": False}
+    if not cfg:
+        return False, "No config"
+
+    try:
+        from src.net.wifi_manager import WiFiManager
+        wifi = WiFiManager()
+
+        ok, ip, status = wifi.connect(
+            cfg.get("wifi_ssid", ""),
+            cfg.get("wifi_password", ""),
+            timeout_s=10,
+            retry=1
+        )
+        wifi_boot = {"ok": bool(ok), "ip": ip, "status": status}
+        return bool(ok), ("WiFi is connected!" if ok else "WiFi FAIL")
+    except Exception as e:
+        wifi_boot = {"ok": False, "error": repr(e)}
+        return False, "WiFi error"
+
 
 def step_api():
     global api_boot
-    ok, detail, info = api_boot_device_lookup(cfg, wifi_boot or {})
+    if not (isinstance(wifi_boot, dict) and wifi_boot.get("ok")):
+        api_boot = {"ok": False}
+        return False, "No WiFi"
+
+    ok, detail, info = api_device_lookup(cfg)
     api_boot = info
-    return ok, detail
+    return bool(ok), detail
+
+
+def step_gps():
+    global gps_boot
+    ok, detail, info = gps_boot_check(cfg)
+    gps_boot = info
+    return bool(ok), detail
+
 
 steps = [
     ("Loading config", step_load_config),
     ("RTC clock", step_rtc),
-    ("Warming sensors", step_warmup),
-    ("Connecting to WiFi", step_wifi),
-    ("Checking device", step_api),
+    ("Warming sensors...", step_warmup),
+    ("Connecting to WiFi...", step_wifi),
+    ("Device API check...", step_api),
+    ("GPS check...", step_gps),
 ]
 
-# Run pipeline with visual progress + mpremote logs
 if booter:
-    booter.boot_pipeline(steps, intro_ms=500, fps=18, settle_ms=120, logger=_log)
+    # Hold version at start for 0.5s
+    # Avoid Booter’s post-finish pause (we’ll control the final message ourselves)
+    booter.boot_pipeline(
+        steps,
+        intro_ms=500,
+        fps=18,
+        settle_ms=0,
+        logger=_log
+    )
+
+    # Overwrite Booter’s final footer with our final message + 0.5s hold
+    try:
+        booter._draw_frame(p=1.0, footer="Ready to go!")
+        time.sleep_ms(500)
+    except Exception:
+        pass
 else:
-    # fallback: just run steps
     for label, fn in steps:
         _log("[BOOT] " + label)
         try:
             fn()
         except Exception as e:
-            _log("[BOOT] EXC " + label + ": " + repr(e))
+            _log("ERR " + repr(e))
 
-# Optional: show assignment for 4s if API OK
-show_assignment(oled, api_boot, ms=4000)
 
-# Launch app core loop
+# Show waiting immediately after boot
+go_waiting(oled, wifi_boot=wifi_boot, api_boot=api_boot, gps_boot=gps_boot)
+
+
+# Launch app loop
 try:
     from src.app.main import run
     run(

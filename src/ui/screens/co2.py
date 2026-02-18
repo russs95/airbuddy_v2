@@ -1,26 +1,32 @@
 # src/ui/screens/co2.py
-# CO₂ screen for AirBuddy
+# CO₂ screen for AirBuddy (RAM-lean)
 # Pico / MicroPython safe
 
+import gc
 from src.ui.thermobar import ThermoBar
 from src.ui.glyphs import draw_sub2, draw_face9
 
 
 class CO2Screen:
-    """
-    CO₂ (eCO2) screen (128x64)
-
-    Health bar reference:
-      400              1000        2000         5000
-      :-)  OK  MEH  BAD  xx-(
-
-    Confidence:
-      - uses reading.confidence if present
-      - if confidence_pct passed in, it overrides reading.confidence
-      - if nothing available, shows "XX% CONF"
-    """
-
     DISPLAY_DURATION = 4
+
+    # ppm -> step mapping edges (11 points = 10 bins)
+    _EDGES = (400, 550, 700, 850, 1000, 1300, 1600, 2000, 2600, 3400, 5000)
+
+    # Fixed UI strings (avoid re-alloc each call)
+    _TXT_ECO = "eCO"
+    _TXT_PPM = "PPM"
+    _TXT_CONF = "CONF"
+    _TXT_NA = "SENSOR NOT READY"
+    _TXT_XX = "XX%"
+
+    # Fixed scale labels
+    _SCALE_TXT = ("400", "1000", "2000", "5000")
+    _SCALE_X = (2, 40, 78, 108)
+
+    # Bottom labels
+    _LBL_TXT = ("OK", "MEH", "BAD")
+    _LBL_X = (30, 56, 82)
 
     def __init__(self, oled):
         self.oled = oled
@@ -32,45 +38,73 @@ class CO2Screen:
         self.f_small = getattr(oled, "f_small", None)
         self.f_vs = oled.f_vsmall
 
+        # Choose a "small-ish" writer once
+        self.w_small = self.f_small if self.f_small else self.f_vs
+
         # Bar
         self.bar = ThermoBar(oled)
 
-        # Scale labels above bar
-        self.scale_ppm = [400, 1000, 2000, 5000]
-        self.scale_x = [2, 40, 78, 108]  # tuned positions
+        # Layout
+        w = int(self.oled.width)
+        h = int(self.oled.height)
 
-        # Bottom labels
+        self.bar_x = 2
+        self.bar_w = w - 4
+
+        self.scale_y = 34
+        self.bar_y = 45
+
+        self.faces_y = 0 if h < 9 else (h - 9)
+
+        # labels baseline aligned to vsmall height
+        _, h_vs = self.oled._text_size(self.f_vs, "Ag")
+        self.labels_y = self.faces_y + 9 - h_vs
+        if self.labels_y < 0:
+            self.labels_y = 0
+
         self.left_face = "good"
         self.right_face = "verybad"
-
-        # Layout tuning
-        self.bar_x = 2
-        self.bar_w = int(self.oled.width) - 4
-
-        # Numbers + bar spacing
-        self.scale_y = 34
-        self.bar_y = 45  # lowered by 2px
-
-        # 9px face glyph baseline
-        self.faces_y = max(0, int(self.oled.height) - 9)
-
-        _, h_vs = self.oled._text_size(self.f_vs, "Ag")
-        self.labels_y = max(0, self.faces_y + 9 - h_vs)
-
         self.left_face_x = 2
-        self.label_texts = ["OK", "MEH", "BAD"]
-        self.label_x = [30, 56, 82]
         self.right_face_x = 110
 
-        # Ticks at thresholds (we will align these to the label centers)
-        self.tick_ppm = [400, 1000, 2000, 5000]
+        # Precompute fixed widths (avoid repeated .size() calls)
+        self._w_eco, _ = (self.f_arvo if self.f_arvo else self.f_med).size(self._TXT_ECO)
+        self._w_ppm, _ = self.w_small.size(self._TXT_PPM)
+        self._scale_w = []
+        for t in self._SCALE_TXT:
+            tw, _ = self.w_small.size(t)
+            self._scale_w.append(int(tw))
 
-        self.tick_offset = {
-            1000: 5,
-            2000: -1,
-            5000: -2,
-        }
+        # Precompute inner limits (must match ThermoBar inset logic)
+        inner_x = self.bar_x + 2
+        inner_w = self.bar_w - 4
+        if inner_w < 1:
+            inner_w = 1
+        self._inner_lo = inner_x
+        self._inner_hi = inner_x + inner_w - 1
 
+        # Precompute tick X positions aligned to label centers + tiny offsets
+        # (replaces dict + index lookups)
+        self._tick_x = []
+        for i in range(4):
+            x_label = int(self._SCALE_X[i])
+            x_center = x_label + (self._scale_w[i] // 2)
+
+            # manual nudges (kept from your tuning)
+            if i == 1:      # 1000
+                x_center += 5
+            elif i == 2:    # 2000
+                x_center += -1
+            elif i == 3:    # 5000
+                x_center += -2
+
+            # clamp
+            if x_center < self._inner_lo:
+                x_center = self._inner_lo
+            elif x_center > self._inner_hi:
+                x_center = self._inner_hi
+
+            self._tick_x.append(int(x_center))
 
     # -------------------------------------------------
     # Public API
@@ -78,10 +112,14 @@ class CO2Screen:
     def show(self, reading, confidence_pct=None):
         self.oled.clear()
 
+        # free memory right before first draw/write burst
+        gc.collect()
+
         ppm = int(getattr(reading, "eco2_ppm", 0))
         ready = bool(getattr(reading, "ready", True))
+        not_ready = (not ready) or (ppm <= 0)
 
-        # Confidence
+        # Confidence (keep lean: avoid format())
         conf = None
         if confidence_pct is not None:
             try:
@@ -95,15 +133,13 @@ class CO2Screen:
                 conf = None
 
         if conf is None:
-            conf_text = "XX%"
+            conf_text = self._TXT_XX
         else:
             if conf < 0:
                 conf = 0
-            if conf > 100:
+            elif conf > 100:
                 conf = 100
-            conf_text = "{}%".format(conf)
-
-        not_ready = (not ready) or (ppm <= 0)
+            conf_text = str(conf) + "%"
 
         self._draw_header(ppm, conf_text, not_ready)
         self._draw_scale_numbers()
@@ -118,66 +154,59 @@ class CO2Screen:
     # -------------------------------------------------
     def _draw_header(self, ppm, conf_text, not_ready):
         x0 = 2
-
-        # Lower title by 2px
         y_title = 2
-
-        # Lower CONF line by 5px (relative to previous)
         status_y = 19
 
-        # Title: "eCO" + subscript 2 (Arvo if available else MED)
         title_writer = self.f_arvo if self.f_arvo else self.f_med
 
-        # Faux-bold title for readability
-        title_writer.write("eCO", x0, y_title)
-        title_writer.write("eCO", x0 + 1, y_title)
+        # Title (no faux-bold)
+        title_writer.write(self._TXT_ECO, x0, y_title)
 
-        w_eco, _ = title_writer.size("eCO")
-        sub2_x = x0 + int(w_eco) + 1
+        sub2_x = x0 + int(self._w_eco) + 1
         sub2_y = y_title + 10
         draw_sub2(self.oled.oled, sub2_x, sub2_y, scale=1, color=1)
 
-        # "PPM" in SMALL (fallback to VSMALL)
-        ppm_writer = self.f_small if self.f_small else self.f_vs
+        # "PPM"
         ppm_x = sub2_x + 6
-        ppm_writer.write("PPM", ppm_x, y_title + (4 if ppm_writer is self.f_small else 5))
+        ppm_y = y_title + (4 if self.w_small is self.f_small else 5)
+        self.w_small.write(self._TXT_PPM, ppm_x, ppm_y)
 
-        # Status line
+        # Status
         if not_ready:
-            self.f_med.write("SENSOR NOT READY", x0, status_y)
+            self.f_med.write(self._TXT_NA, x0, status_y)
         else:
-            conf_writer = self.f_small if self.f_small else self.f_vs
-            conf_writer.write(conf_text, x0, status_y + (1 if conf_writer is self.f_small else 0))
-            w_pct, _ = conf_writer.size(conf_text)
-            conf_writer.write("CONF", x0 + int(w_pct) + 6, status_y + (1 if conf_writer is self.f_small else 0))
+            yy = status_y + (1 if self.w_small is self.f_small else 0)
+            self.w_small.write(conf_text, x0, yy)
+            w_pct, _ = self.w_small.size(conf_text)
+            self.w_small.write(self._TXT_CONF, x0 + int(w_pct) + 6, yy)
 
-        # Value top-right, LARGE (only when ready)
+        # Value (only when ready)
         if not not_ready:
             val = str(int(ppm))
             tw, _ = self.f_large.size(val)
             x = int(self.oled.width) - int(tw) - 2
-            y = 2
-            self.f_large.write(val, x, y)
+            self.f_large.write(val, x, 2)
 
     def _draw_scale_numbers(self):
-        # numbers above bar should be SMALL (fallback to VSMALL)
-        writer = self.f_small if self.f_small else self.f_vs
         y = self.scale_y
-        for ppm, x in zip(self.scale_ppm, self.scale_x):
-            writer.write(str(ppm), int(x), int(y))
+        w = self.w_small
+        # manual loop avoids zip() iterator object
+        w.write(self._SCALE_TXT[0], self._SCALE_X[0], y)
+        w.write(self._SCALE_TXT[1], self._SCALE_X[1], y)
+        w.write(self._SCALE_TXT[2], self._SCALE_X[2], y)
+        w.write(self._SCALE_TXT[3], self._SCALE_X[3], y)
 
     def _ppm_to_step_p(self, ppm):
-        edges = [400, 550, 700, 850, 1000, 1300, 1600, 2000, 2600, 3400, 5000]
-
+        edges = self._EDGES
         if ppm <= edges[0]:
             return 0.0
         if ppm >= edges[-1]:
             return 1.0
 
+        # 10 bins
         for i in range(10):
             if edges[i] <= ppm < edges[i + 1]:
                 return (i + 1) / 10.0
-
         return 1.0
 
     def _draw_bar(self, ppm, not_ready):
@@ -195,55 +224,31 @@ class CO2Screen:
         # Pointer at end of fill
         if not not_ready:
             x_end = self.bar_x + int(round(p * (self.bar_w - 1)))
-            x_end = max(self.bar_x, min(self.bar_x + self.bar_w - 1, x_end))
+            if x_end < self.bar_x:
+                x_end = self.bar_x
+            elif x_end > (self.bar_x + self.bar_w - 1):
+                x_end = self.bar_x + self.bar_w - 1
             self.oled.oled.pixel(x_end, self.bar_y - 1, 1)
 
-    def _inner_track_limits(self):
-        # Must match ThermoBar._inner_geom() horizontal inset behavior
-        inner_x = self.bar_x + 2
-        inner_w = self.bar_w - 4
-        if inner_w < 1:
-            inner_w = 1
-        return inner_x, inner_x + inner_w - 1
-
-    def _tick_x_for_label_center(self, ppm):
-        writer = self.f_small if self.f_small else self.f_vs
-
-        try:
-            i = self.scale_ppm.index(ppm)
-            x_label = int(self.scale_x[i])
-        except Exception:
-            x_label = 0
-
-        txt = str(ppm)
-        tw, _ = writer.size(txt)
-        x_center = x_label + (int(tw) // 2)
-
-        # --- Apply optional manual offset ---
-        x_center += self.tick_offset.get(ppm, 0)
-
-        lo, hi = self._inner_track_limits()
-        if x_center < lo:
-            x_center = lo
-        if x_center > hi:
-            x_center = hi
-
-        return x_center
-
-
     def _draw_tick(self, x):
-        """
-        Tick is 1px taller ABOVE the top border than before.
-        Top border is at bar_y, so start at bar_y-2.
-        """
+        # 6px tall; starts 2px above border
         y0 = self.bar_y - 2
-        for yy in range(6):  # 6px tall
-            self.oled.oled.pixel(int(x), int(y0 + yy), 1)
+        fb = self.oled.oled
+        x = int(x)
+        fb.pixel(x, y0 + 0, 1)
+        fb.pixel(x, y0 + 1, 1)
+        fb.pixel(x, y0 + 2, 1)
+        fb.pixel(x, y0 + 3, 1)
+        fb.pixel(x, y0 + 4, 1)
+        fb.pixel(x, y0 + 5, 1)
 
     def _draw_fixed_ticks(self):
-        for ppm in self.tick_ppm:
-            x = self._tick_x_for_label_center(ppm)
-            self._draw_tick(x)
+        # 4 ticks at the 4 scale labels
+        tx = self._tick_x
+        self._draw_tick(tx[0])
+        self._draw_tick(tx[1])
+        self._draw_tick(tx[2])
+        self._draw_tick(tx[3])
 
     def _draw_bottom_labels(self):
         y_face = self.faces_y
@@ -251,7 +256,9 @@ class CO2Screen:
 
         draw_face9(self.oled.oled, int(self.left_face_x), int(y_face), mood=self.left_face, scale=1, color=1)
 
-        for txt, x in zip(self.label_texts, self.label_x):
-            self.f_vs.write(txt, int(x), int(y_text))
+        w = self.f_vs
+        w.write(self._LBL_TXT[0], self._LBL_X[0], y_text)
+        w.write(self._LBL_TXT[1], self._LBL_X[1], y_text)
+        w.write(self._LBL_TXT[2], self._LBL_X[2], y_text)
 
         draw_face9(self.oled.oled, int(self.right_face_x), int(y_face), mood=self.right_face, scale=1, color=1)

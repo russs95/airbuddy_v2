@@ -1,5 +1,6 @@
 # src/ui/booter.py  (MicroPython / Pico-safe)
 import time
+import gc
 from src.ui import logo_airbuddy
 from src.ui.thermobar import ThermoBar
 
@@ -10,7 +11,17 @@ class Booter:
 
     - boot_pipeline(steps): step-by-step progress bar + footer text + logs
     - show(duration,fps): legacy smooth bar animation (used for sensor warmup)
-      (This method was missing and caused: AttributeError: no attribute 'show')
+
+    LOW-RAM patches:
+    - Single-pass footer draw (no shadow / no double-write)
+    - gc.collect() before footer writes + between steps
+    - Reduced ramp frames to minimize repeated font allocations
+    - MemoryError-safe footer fallback
+
+    UI/Timing patches:
+    - Faster progression: per-step settle reduced
+    - Ramp frames reduced to 1 (less flicker + faster)
+    - Final "Locked & loaded!" hold reduced to tiny blink (default 20ms)
     """
 
     def __init__(self, oled):
@@ -53,22 +64,42 @@ class Booter:
             fb.show()
 
     # -------------------------------------------------
-    # Text helpers
+    # Text helpers (LOW-RAM safe)
     # -------------------------------------------------
     def _draw_centered_text_shadow(self, writer, text, y):
+        """
+        LOW-RAM safe centered footer draw.
+        - Avoids double-write shadow (saves heap + time)
+        - Falls back to rough centering if writer.size() fails
+        - Handles MemoryError gracefully
+        """
         if not writer or text is None:
             return
-        text = str(text)
 
+        s = str(text)
         w = int(getattr(self.oled, "width", 128))
-        try:
-            tw, _ = writer.size(text)
-        except Exception:
-            tw = len(text) * 6
-        x = max(0, (w - tw) // 2)
 
-        writer.write(text, x + 1, y + 1)
-        writer.write(text, x, y)
+        # Centering: try exact width, else fallback
+        try:
+            tw, _ = writer.size(s)
+            x = max(0, (w - int(tw)) // 2)
+        except Exception:
+            x = max(0, (w - (len(s) * 6)) // 2)
+
+        try:
+            writer.write(s, x, y)
+        except MemoryError:
+            try:
+                gc.collect()
+            except Exception:
+                pass
+            try:
+                short = s[:max(0, self._footer_max_chars - 4)]
+                writer.write(short, 0, y)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     # -------------------------------------------------
     # Logo blit (pixel-safe)
@@ -150,9 +181,13 @@ class Booter:
         footer_y = bar_y + bar_h + gap_bar_to_footer
 
         return {
-            "w": w, "h": h,
-            "lw": lw, "lh": lh,
-            "bar_x": bar_x, "bar_y": bar_y, "bar_w": bar_w,
+            "w": w,
+            "h": h,
+            "lw": lw,
+            "lh": lh,
+            "bar_x": bar_x,
+            "bar_y": bar_y,
+            "bar_w": bar_w,
             "logo_y": logo_y,
             "footer_y": footer_y,
         }
@@ -180,6 +215,11 @@ class Booter:
         self.bar.draw(bar_x, bar_y, bar_w, p=max(0.0, min(1.0, float(p))))
 
         if footer and self.f_footer:
+            try:
+                gc.collect()
+            except Exception:
+                pass
+
             s = str(footer)
             if len(s) > self._footer_max_chars:
                 s = s[:self._footer_max_chars]
@@ -188,18 +228,14 @@ class Booter:
         self._show_fb()
 
     # -------------------------------------------------
-    # ✅ Legacy warmup animation (used by src/app/main.py)
+    # Legacy warmup animation (used by src/app/main.py)
     # -------------------------------------------------
     def show(self, duration=4.0, fps=18, footer=None):
-        """
-        Smooth progress bar animation (no steps), for warmups.
-        """
         self._layout = self._calc_layout()
 
         frames = max(1, int(float(duration) * float(fps)))
         delay_ms = int(1000 / max(1, int(fps)))
 
-        # Start at 0
         self._draw_frame(p=0.0, footer=footer or self.version)
 
         for i in range(frames + 1):
@@ -210,7 +246,21 @@ class Booter:
     # -------------------------------------------------
     # Boot pipeline
     # -------------------------------------------------
-    def boot_pipeline(self, steps, intro_ms=500, fps=18, settle_ms=120, logger=None):
+    def boot_pipeline(
+            self,
+            steps,
+            intro_ms=500,
+            fps=18,
+            settle_ms=120,
+            logger=None,
+            *,
+            # New: explicit final hold so you can eliminate delay after "Locked & loaded!"
+            final_hold_ms=20,
+            # New: fewer ramp frames (1 is fastest/least flicker)
+            ramp_frames=1,
+            # New: per-step pause (override settle_ms behavior cleanly)
+            step_pause_ms=None
+    ):
         if logger is None:
             logger = print
 
@@ -219,7 +269,7 @@ class Booter:
         # Intro
         self._draw_frame(p=0.0, footer=self.version)
         logger("[BOOT] " + self.version)
-        time.sleep_ms(intro_ms)
+        time.sleep_ms(int(intro_ms) if intro_ms is not None else 0)
 
         try:
             total = len(steps)
@@ -229,8 +279,12 @@ class Booter:
         if total <= 0:
             self._draw_frame(p=1.0, footer="Locked & loaded!")
             logger("[BOOT] Locked & loaded!")
-            time.sleep_ms(settle_ms)
+            if final_hold_ms and int(final_hold_ms) > 0:
+                time.sleep_ms(int(final_hold_ms))
             return {"ok": True, "results": []}
+
+        # If step_pause_ms not specified, keep using settle_ms
+        pause_ms = int(step_pause_ms) if step_pause_ms is not None else int(settle_ms)
 
         results = []
         p_prev = 0.0
@@ -245,7 +299,10 @@ class Booter:
 
             self._draw_frame(p=p_prev, footer=label)
             logger("[BOOT] " + label)
-            time.sleep_ms(settle_ms)
+
+            # Per-step pause (set to 0 to go full speed)
+            if pause_ms > 0:
+                time.sleep_ms(pause_ms)
 
             ok = True
             detail = None
@@ -270,16 +327,26 @@ class Booter:
                 detail = "err:" + repr(e)
                 logger("[BOOT] EXC in " + label + ": " + repr(e))
 
+            # LOW-RAM: collect after running a step (especially WiFi/API)
+            try:
+                gc.collect()
+            except Exception:
+                pass
+
             results.append({"label": label, "ok": ok, "detail": detail})
 
             p_next = float(idx + 1) / float(total)
 
-            ramp_frames = max(3, int(fps * 0.12))
-            for j in range(ramp_frames):
-                pj = p_prev + (p_next - p_prev) * ((j + 1) / float(ramp_frames))
+            # Ramp animation (default now 1 frame)
+            rf = int(ramp_frames) if ramp_frames is not None else 1
+            if rf < 1:
+                rf = 1
+
+            for j in range(rf):
+                pj = p_prev + (p_next - p_prev) * ((j + 1) / float(rf))
                 footer = detail if detail else label
                 self._draw_frame(p=pj, footer=footer)
-                time.sleep_ms(int(1000 / max(1, fps)))
+                time.sleep_ms(int(1000 / max(1, int(fps))))
 
             status = "OK" if ok else "FAIL"
             if detail:
@@ -289,9 +356,11 @@ class Booter:
 
             p_prev = p_next
 
+        # Final: minimal hold so waiting screen can take over immediately
         self._draw_frame(p=1.0, footer="Locked & loaded!")
         logger("[BOOT] Locked & loaded!")
-        time.sleep_ms(settle_ms)
+        if final_hold_ms and int(final_hold_ms) > 0:
+            time.sleep_ms(int(final_hold_ms))
 
         all_ok = True
         for r in results:

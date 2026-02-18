@@ -1,6 +1,8 @@
 # src/ui/glyphs.py — tiny pixel glyphs for SSD1306/framebuf
 # Pico / MicroPython safe
 
+import time
+
 # ------------------------------------------------------------
 # Low-level helpers
 # ------------------------------------------------------------
@@ -41,7 +43,8 @@ def draw_bitmap_rows(fb, x, y, rows, c=1):
     rows: list[str] of '0'/'1' where each string is a row of pixels.
     Top-left at (x, y).
     """
-    x = int(x); y = int(y)
+    x = int(x)
+    y = int(y)
     for ry, row in enumerate(rows):
         for rx, ch in enumerate(row):
             if ch == "1":
@@ -57,18 +60,20 @@ def draw_degree(fb, x, y, r=2, color=1):
     Small hollow degree ring.
     (x, y) is top-left-ish anchor used in your screens.
     """
-    x = int(x); y = int(y); r = int(r)
+    x = int(x)
+    y = int(y)
+    r = int(r)
     cx = x + r
     cy = y + r
 
     pts = [
-        (0, r), (1, r), (2, r-1),
-        (r, 0), (r, 1), (r-1, 2),
+        (0, r), (1, r), (2, r - 1),
+        (r, 0), (r, 1), (r - 1, 2),
     ]
     for dx, dy in pts:
-        for sx, sy in ((1,1),(1,-1),(-1,1),(-1,-1)):
-            _pix(fb, cx + sx*dx, cy + sy*dy, color)
-            _pix(fb, cx + sx*dy, cy + sy*dx, color)
+        for sx, sy in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
+            _pix(fb, cx + sx * dx, cy + sy * dy, color)
+            _pix(fb, cx + sx * dy, cy + sy * dx, color)
 
 
 # ------------------------------------------------------------
@@ -79,19 +84,21 @@ def draw_circle(fb, cx, cy, r=4, filled=False, color=1):
     """
     Draws a small circle. If filled=True, draws a simple filled center.
     """
-    cx = int(cx); cy = int(cy); r = int(r)
+    cx = int(cx)
+    cy = int(cy)
+    r = int(r)
 
     pts = [
-        (0, r), (1, r), (2, r-1), (3, r-2),
-        (r, 0), (r, 1), (r-1, 2), (r-2, 3),
+        (0, r), (1, r), (2, r - 1), (3, r - 2),
+        (r, 0), (r, 1), (r - 1, 2), (r - 2, 3),
     ]
     for dx, dy in pts:
-        for sx, sy in ((1,1),(1,-1),(-1,1),(-1,-1)):
-            _pix(fb, cx + sx*dx, cy + sy*dy, color)
-            _pix(fb, cx + sx*dy, cy + sy*dx, color)
+        for sx, sy in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
+            _pix(fb, cx + sx * dx, cy + sy * dy, color)
+            _pix(fb, cx + sx * dy, cy + sy * dx, color)
 
     if filled:
-        _fill_rect(fb, cx-1, cy-1, 3, 3, color)
+        _fill_rect(fb, cx - 1, cy - 1, 3, 3, color)
 
 
 # ------------------------------------------------------------
@@ -114,11 +121,13 @@ def draw_c(fb, x, y, scale=1, color=1):
         "0000000",
     ]
 
-    x = int(x); y = int(y); scale = max(1, int(scale))
+    x = int(x)
+    y = int(y)
+    scale = max(1, int(scale))
     for ry, row in enumerate(rows):
         for rx, ch in enumerate(row):
             if ch == "1":
-                _fill_rect(fb, x + rx*scale, y + ry*scale, scale, scale, color)
+                _fill_rect(fb, x + rx * scale, y + ry * scale, scale, scale, color)
 
 
 # ------------------------------------------------------------
@@ -137,27 +146,32 @@ def draw_sub2(fb, x, y, scale=1, color=1):
         "1110",
     ]
 
-    x = int(x); y = int(y); scale = max(1, int(scale))
+    x = int(x)
+    y = int(y)
+    scale = max(1, int(scale))
     for ry, row in enumerate(rows):
         for rx, ch in enumerate(row):
             if ch == "1":
-                _fill_rect(fb, x + rx*scale, y + ry*scale, scale, scale, color)
+                _fill_rect(fb, x + rx * scale, y + ry * scale, scale, scale, color)
 
 
 # ------------------------------------------------------------
 # 9px-high face glyphs for thermo-bar labels (eyes + mouth only)
 # ------------------------------------------------------------
+# Width is 11px; Height is 9px.
 
 _FACE_9PX = {
+    # FIXED: "good" now uses a clean symmetric smile.
+    # Old one read wrong / "grin" looked broken on SSD1306.
     "good": [
         "11000000011",
         "11000000011",
         "00000000000",
         "00000000000",
-        "00100000100",
-        "00010001000",
-        "00001110000",
         "00000000000",
+        "01000000010",
+        "00100000100",
+        "00011111000",
         "00000000000",
     ],
     "ok": [
@@ -214,27 +228,26 @@ def draw_face9(fb, x, y, mood="ok", scale=1, color=1):
     """
     rows = _FACE_9PX.get(str(mood).lower(), _FACE_9PX["ok"])
 
-    x = int(x); y = int(y); scale = max(1, int(scale))
+    x = int(x)
+    y = int(y)
+    scale = max(1, int(scale))
     for ry, row in enumerate(rows):
         for rx, ch in enumerate(row):
             if ch == "1":
-                _fill_rect(fb, x + rx*scale, y + ry*scale, scale, scale, color)
+                _fill_rect(fb, x + rx * scale, y + ry * scale, scale, scale, color)
+
 
 # ------------------------------------------------------------
-# NEW (REV): compact status indicators (6px high)
-# - Smaller than 9px to reduce vertical crowding
-# - Designed for top row use
+# Compact status indicators (top row use)
 # ------------------------------------------------------------
 
 # ----------------------------
 # WiFi indicator (9x6)
-#   ON  = solid triangle with WIDE BASE AT BOTTOM (as requested)
+#   ON  = solid triangle with WIDE BASE AT BOTTOM
 #   OFF = hollow inverted pyramid (points DOWN)
 # ----------------------------
 
-# Original was appearing inverted in your UI, so we explicitly flip it vertically here.
 _WIFI_ON_6 = [
-    # wide base at bottom
     "111111111",
     "111111111",
     "011111110",
@@ -244,7 +257,6 @@ _WIFI_ON_6 = [
 ]
 
 _WIFI_OFF_6 = [
-    # hollow down triangle outline
     "111111111",
     "100000001",
     "010000010",
@@ -253,27 +265,24 @@ _WIFI_OFF_6 = [
     "000010000",
 ]
 
+
 def draw_wifi(fb, x, y, on=True, color=1):
     """
     Draw compact WiFi indicator at (x, y). Size: 9x6.
-    - on=True  => solid triangle, wide base at bottom
-    - on=False => hollow inverted pyramid outline (points DOWN)
     """
     rows = _WIFI_ON_6 if bool(on) else _WIFI_OFF_6
     draw_bitmap_rows(fb, x, y, rows, c=color)
 
-# Backward compatible alias (if older code calls draw_wifi9)
+
 def draw_wifi9(fb, x, y, on=True, color=1):
     draw_wifi(fb, x, y, on=on, color=color)
 
 
 # ----------------------------
 # GPS indicator (14x6) — blocky "GPS"
-# Horizontal/vertical strokes only.
 # ----------------------------
 
 _GPS_6 = [
-    # G(4) 0 P(4) 0 S(4) => 14 columns
     "1111" "0" "1110" "0" "1111",
     "1000" "0" "1001" "0" "1000",
     "1011" "0" "1110" "0" "1111",
@@ -282,50 +291,115 @@ _GPS_6 = [
     "1111" "0" "1000" "0" "1111",
 ]
 
+
 def draw_gps(fb, x, y, color=1):
     """
     Draw compact 6px-high 'GPS' at (x, y). Size: 14x6.
     """
     draw_bitmap_rows(fb, x, y, _GPS_6, c=color)
 
-# Backward compatible alias
+
 def draw_gps9(fb, x, y, color=1):
     draw_gps(fb, x, y, color=color)
 
 
 # ----------------------------
-# API indicator (7x7) — dedicated glyph (ONE ROW TALLER)
-#   ON  = hollow ring with center dot
-#   OFF = hollow ring only
-# Height now matches others visually better.
+# API indicator (7x6)  <-- matches WiFi/GPS height
+#
+# Visual Logic:
+# - Offline  -> ring + SOLID center dot
+# - Connected idle -> filled + EMPTY center dot ("hole")
+# - Heartbeat -> alternate ring/dot <-> filled/hole
+# - Sending -> filled/hole (forced)
 # ----------------------------
 
-_API_ON_7 = [
+_API_RING_6 = [
     "0011100",
     "0100010",
-    "1000001",
-    "1001001",  # center dot pair
-    "1000001",
-    "0100010",
-    "0011100",
-]
-
-_API_OFF_7 = [
-    "0011100",
-    "0100010",
-    "1000001",
     "1000001",
     "1000001",
     "0100010",
     "0011100",
 ]
 
-def draw_api(fb, x, y, on=True, color=1):
-    """
-    Draw compact API indicator at (x, y). Size: 7x7.
-    - on=True  => ring + dot
-    - on=False => ring only (hollow)
-    """
-    rows = _API_ON_7 if bool(on) else _API_OFF_7
-    draw_bitmap_rows(fb, x, y, rows, c=color)
+_API_FILLED_6 = [
+    "0011100",
+    "0111110",
+    "1111111",
+    "1111111",
+    "0111110",
+    "0011100",
+]
 
+
+def _api_heartbeat_on(now_ms=None):
+    """
+    Double-beat pattern (~1000ms cycle):
+      beat1: 0-80ms
+      gap  : 80-180ms
+      beat2: 180-250ms
+      rest : 250-1000ms
+
+    Returns True when circle should be FILLED (connected state).
+    """
+    try:
+        if now_ms is None:
+            now_ms = time.ticks_ms()
+        t = now_ms % 1000
+    except Exception:
+        t = int(time.time() * 1000) % 1000
+
+    return (0 <= t < 80) or (180 <= t < 250)
+
+
+def _api_center_dot_xy():
+    # 7x6 => x center is +3; y "center" sits nicely at row +2
+    return 3, 2
+
+
+def _api_draw_center_dot(fb, x, y, on=True):
+    """
+    Draw (on=True) or clear (on=False) the center dot pixel.
+    Clearing works because we draw a 0 pixel on top of the filled glyph.
+    """
+    dx, dy = _api_center_dot_xy()
+    try:
+        fb.pixel(int(x) + dx, int(y) + dy, 1 if on else 0)
+    except Exception:
+        # fallback: ignore if framebuffer doesn't support pixel writes (unlikely)
+        pass
+
+
+def draw_api(fb, x, y, on=True, color=1, *, heartbeat=False, sending=False, now_ms=None):
+    """
+    Draw API indicator at (x, y).
+
+    Modes:
+    - sending=True  -> filled + hole
+    - on=False      -> ring + solid dot
+    - on=True:
+         heartbeat=True  -> alternates ring/dot <-> filled/hole
+         heartbeat=False -> filled + hole (steady)
+    """
+    x = int(x)
+    y = int(y)
+
+    # Decide "filled" vs "ring"
+    if sending:
+        filled = True
+    elif not bool(on):
+        filled = False
+    elif heartbeat:
+        filled = _api_heartbeat_on(now_ms=now_ms)
+    else:
+        filled = True
+
+    # Draw base glyph
+    if filled:
+        draw_bitmap_rows(fb, x, y, _API_FILLED_6, c=color)
+        # Invert dot: make it EMPTY ("hole")
+        _api_draw_center_dot(fb, x, y, on=False)
+    else:
+        draw_bitmap_rows(fb, x, y, _API_RING_6, c=color)
+        # Hollow circle gets SOLID center dot
+        _api_draw_center_dot(fb, x, y, on=True)

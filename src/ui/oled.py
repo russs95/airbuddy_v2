@@ -1,4 +1,4 @@
-# src/ui/oled.py  (MicroPython / Pico W)
+# src/ui/oled.py  (MicroPython / Pico W / ESP32)
 import time
 import framebuf
 import math
@@ -60,9 +60,12 @@ class SSD1306_I2C(framebuf.FrameBuffer):
 
 class OLED:
     """
-    Pico/MicroPython SSD1306 OLED helper.
+    SSD1306 OLED helper.
 
-    Uses framebuf + ezFBfont for rendering your custom fonts.
+    HAL behavior:
+      - If caller passes i2c=..., we use it.
+      - Else if caller explicitly passes pin_sda/pin_scl (not None), we create I2C with those pins.
+      - Else we ask src.hal.board.init_i2c() for the correct bus for this board (Pico vs ESP32).
     """
 
     def __init__(
@@ -70,15 +73,28 @@ class OLED:
             width=128,
             height=64,
             addr=0x3C,
+            i2c=None,
             i2c_id=0,
-            pin_sda=0,
-            pin_scl=1,
+            pin_sda=None,
+            pin_scl=None,
             freq=100_000,
     ):
         self.width = width
         self.height = height
 
-        self.i2c = I2C(i2c_id, sda=Pin(pin_sda), scl=Pin(pin_scl), freq=freq)
+        # 1) Prefer injected bus
+        if i2c is not None:
+            self.i2c = i2c
+
+        # 2) If explicit pins provided, honor them (backwards compatible)
+        elif pin_sda is not None and pin_scl is not None:
+            self.i2c = I2C(i2c_id, sda=Pin(pin_sda), scl=Pin(pin_scl), freq=freq)
+
+        # 3) Otherwise, use HAL-selected pins for current board
+        else:
+            from src.hal.board import init_i2c
+            self.i2c = init_i2c()
+
         self.oled = SSD1306_I2C(width, height, self.i2c, addr=addr)
 
         # --- ezFBfont writers bound to the framebuffer device ---
@@ -89,6 +105,7 @@ class OLED:
         self.f_arvo = ezFBfont(self.oled, fonts.get("arvo"), fg=1, bg=0, tkey=-1)
         self.f_arvo16 = ezFBfont(self.oled, fonts.get("arvo16"), fg=1, bg=0, tkey=-1)
         self.f_arvo20 = ezFBfont(self.oled, fonts.get("arvo20"), fg=1, bg=0, tkey=-1)
+
         # Screens
         self.waiting_screen = WaitingScreen(flip_x=False, flip_y=True, gap=6)
 
@@ -124,10 +141,8 @@ class OLED:
     # Screens
     # ----------------------------
     def show_waiting(self, line="Know your air"):
+        # (your file had duplicate render calls; keeping just one)
         self.waiting_screen.render(self, line=line, animate=True, period_ms=1000)
-
-    # Delegate to WaitingScreen renderer
-        self.waiting_screen.render(self, line=line)
 
     def show_spinner_frame(self, frame):
         self.oled.fill(0)
