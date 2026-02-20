@@ -72,10 +72,7 @@ class GPSScreen:
             p = line.split(",")
             if len(p) < 7:
                 return
-            if p[2] == "A":
-                self.last_fix = True
-            elif p[2] == "V":
-                self.last_fix = False
+            self.last_fix = (p[2] == "A")
 
             if p[3] and p[4] and p[5] and p[6]:
                 lat = self._nmea_degmin_to_deg(p[3], p[4])
@@ -91,15 +88,13 @@ class GPSScreen:
             p = line.split(",")
             if len(p) < 8:
                 return
-            fixq = p[6]
-            sats = p[7]
 
-            if fixq and fixq != "0":
+            if p[6] and p[6] != "0":
                 self.last_fix = True
 
-            if sats:
+            if p[7]:
                 try:
-                    self.last_sats = int(sats)
+                    self.last_sats = int(p[7])
                 except Exception:
                     pass
 
@@ -140,7 +135,6 @@ class GPSScreen:
         fb = o.oled
         fb.fill(0)
 
-        # Title — arvo20
         title_writer = o.f_arvo20
         self._w(title_writer, "GPS", 0, 0)
 
@@ -150,7 +144,6 @@ class GPSScreen:
             title_h = 20
 
         data_y0 = int(title_h + 4)
-
         data_writer = o.f_med
 
         try:
@@ -177,9 +170,7 @@ class GPSScreen:
 
         self._w(data_writer, "SATS: " + sats, 0, y3)
 
-        # Toggle only (no text)
         self.toggle.draw(fb, on=self.enabled)
-
         fb.show()
 
     # ----------------------------
@@ -190,39 +181,58 @@ class GPSScreen:
         Single click: go to next settings screen (WiFi)
         Double click: toggle GPS
         """
+
         btn.reset()
 
-        if gps:
+        # 🔥 HARDWARE CHECK
+        if not gps:
+            # Force OFF if hardware not present
             if self.enabled:
-                try: gps.enable()
-                except: pass
+                self.enabled = False
+                self._save_config()
+            self._clear_data()
+            self._draw()
+
+        else:
+            if self.enabled:
+                try:
+                    gps.enable()
+                except Exception:
+                    pass
+                self._consume_once(gps, max_ms=250)
             else:
-                try: gps.disable()
-                except: pass
+                try:
+                    gps.disable()
+                except Exception:
+                    pass
 
-        if self.enabled and gps:
-            self._consume_once(gps, max_ms=250)
-
-        self._draw()
+            self._draw()
 
         while True:
             action = btn.wait_for_action()
 
             if action == "single":
-                return "next"   # 🔥 go to WiFi screen
+                return "single"
 
             if action == "double":
+                # 🔥 Prevent enabling if no hardware
+                if not gps:
+                    continue
+
                 self.enabled = not self.enabled
                 self._save_config()
 
-                if gps:
-                    if self.enabled:
-                        try: gps.enable()
-                        except: pass
-                        self._consume_once(gps, max_ms=300)
-                    else:
-                        try: gps.disable()
-                        except: pass
-                        self._clear_data()
+                if self.enabled:
+                    try:
+                        gps.enable()
+                    except Exception:
+                        pass
+                    self._consume_once(gps, max_ms=300)
+                else:
+                    try:
+                        gps.disable()
+                    except Exception:
+                        pass
+                    self._clear_data()
 
                 self._draw()

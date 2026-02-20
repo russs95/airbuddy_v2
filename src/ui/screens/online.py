@@ -213,7 +213,7 @@ class OnlineScreen:
 
             action = btn.poll_action()
             if action == "single":
-                return "next"
+                return "single"
 
             if action == "double":
                 # Toggle feature on/off (and reset connection state)

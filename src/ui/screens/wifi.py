@@ -160,7 +160,8 @@ class WiFiScreen:
                 self._live_update()
                 self._draw()
 
-            action = btn.wait_for_action()
+            action = btn.poll_action()
+
 
             if action == "single":
                 return "next"

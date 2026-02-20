@@ -176,7 +176,7 @@ class LoggingScreen:
             if pending_single_deadline is not None:
                 if time.ticks_diff(now, pending_single_deadline) >= 0:
                     # no double arrived in time -> treat as next
-                    return "next"
+                    return "single"
 
             if action == "single":
                 # don't exit immediately; give double-click a chance

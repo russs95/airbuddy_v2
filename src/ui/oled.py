@@ -14,14 +14,21 @@ from src.ui.waiting import WaitingScreen
 
 class SSD1306_I2C(framebuf.FrameBuffer):
     """
-    Minimal SSD1306 I2C driver (128x64) using framebuf.
+    Minimal SSD1306/SH1106-compatible I2C framebuffer driver (128x64).
+
+    NOTE:
+    - Many 1.3" "128x64" OLEDs are SH1106 (132px wide internal RAM).
+      They need a column offset (often 2 or 4) when writing pages.
+    - For classic 0.96" SSD1306 modules, col_offset should be 0.
     """
-    def __init__(self, width, height, i2c, addr=0x3C):
-        self.width = width
-        self.height = height
+    def __init__(self, width, height, i2c, addr=0x3C, col_offset=0):
+        self.width = int(width)
+        self.height = int(height)
         self.i2c = i2c
         self.addr = addr
         self.pages = self.height // 8
+        self.col_offset = int(col_offset) if col_offset is not None else 0
+
         self.buffer = bytearray(self.pages * self.width)
         super().__init__(self.buffer, self.width, self.height, framebuf.MONO_VLSB)
         self._init_display()
@@ -29,10 +36,20 @@ class SSD1306_I2C(framebuf.FrameBuffer):
     def _write_cmd(self, cmd):
         self.i2c.writeto(self.addr, bytes([0x00, cmd]))
 
+    def _set_page_col(self, page, col):
+        """
+        Set current page + column. Works for SSD1306 and SH1106-style addressing.
+        """
+        self._write_cmd(0xB0 + (page & 0x0F))
+        self._write_cmd(0x00 | (col & 0x0F))          # low nibble
+        self._write_cmd(0x10 | ((col >> 4) & 0x0F))   # high nibble
+
     def _init_display(self):
+        # This init sequence is SSD1306-ish, but works on a lot of SH1106 boards too.
+        # The critical SH1106 difference for your symptom is the column offset in show().
         for cmd in (
                 0xAE,       # display off
-                0x20, 0x00, # memory addressing mode
+                0x20, 0x00, # memory addressing mode (horizontal)
                 0x40,       # start line
                 0xA1,       # seg remap
                 0xC8,       # COM scan dec
@@ -49,10 +66,13 @@ class SSD1306_I2C(framebuf.FrameBuffer):
         self.show()
 
     def show(self):
+        """
+        Push framebuffer to display.
+        col_offset fixes SH1106 132-column RAM mapping issues (removes edge stripe).
+        """
+        col = self.col_offset
         for page in range(self.pages):
-            self._write_cmd(0xB0 + page)
-            self._write_cmd(0x00)
-            self._write_cmd(0x10)
+            self._set_page_col(page, col)
             start = self.width * page
             end = start + self.width
             self.i2c.writeto(self.addr, b"\x40" + self.buffer[start:end])
@@ -60,12 +80,16 @@ class SSD1306_I2C(framebuf.FrameBuffer):
 
 class OLED:
     """
-    SSD1306 OLED helper.
+    OLED helper.
 
     HAL behavior:
       - If caller passes i2c=..., we use it.
       - Else if caller explicitly passes pin_sda/pin_scl (not None), we create I2C with those pins.
       - Else we ask src.hal.board.init_i2c() for the correct bus for this board (Pico vs ESP32).
+
+    New:
+      - col_offset: fixes SH1106-style displays (common on 1.3" 128x64).
+        Typical values: 0 (SSD1306), 2 or 4 (SH1106 modules).
     """
 
     def __init__(
@@ -78,9 +102,10 @@ class OLED:
             pin_sda=None,
             pin_scl=None,
             freq=100_000,
+            col_offset=0,
     ):
-        self.width = width
-        self.height = height
+        self.width = int(width)
+        self.height = int(height)
 
         # 1) Prefer injected bus
         if i2c is not None:
@@ -95,7 +120,7 @@ class OLED:
             from src.hal.board import init_i2c
             self.i2c = init_i2c()
 
-        self.oled = SSD1306_I2C(width, height, self.i2c, addr=addr)
+        self.oled = SSD1306_I2C(width, height, self.i2c, addr=addr, col_offset=col_offset)
 
         # --- ezFBfont writers bound to the framebuffer device ---
         self.f_vsmall = ezFBfont(self.oled, fonts.VSMALL, fg=1, bg=0, tkey=-1)
@@ -141,7 +166,6 @@ class OLED:
     # Screens
     # ----------------------------
     def show_waiting(self, line="Know your air"):
-        # (your file had duplicate render calls; keeping just one)
         self.waiting_screen.render(self, line=line, animate=True, period_ms=1000)
 
     def show_spinner_frame(self, frame):

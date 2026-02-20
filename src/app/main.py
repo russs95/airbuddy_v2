@@ -1,49 +1,53 @@
-# src/app/main.py — AirBuddy 2.1 core loop (STABLE INPUT VERSION)
+# src/app/main.py — AirBuddy 2.1 core loop (Revised)
 
 import machine
 import time
-from machine import Pin, I2C
 
 from src.app.boot_guard import enforce_debug_guard
-from src.app.gps_init import init_gps
 
+try:
+    from src.hal.board import init_i2c, gps_pins
+except Exception:
+    init_i2c = None
+    gps_pins = None
 
-# ============================================================
-# CONSTANTS
-# ============================================================
-BTN_PIN = 15
+from src.ui.clicks import (
+    gc_collect as _gc,
+    reset_and_flush as _reset_and_flush,
+)
 
-GPS_UART_ID = 1
-GPS_BAUD = 9600
-GPS_TX_PIN = 8
-GPS_RX_PIN = 9
+from src.ui.flows import (
+    connectivity_carousel,
+    sensor_carousel,
+    time_flow,
+    selfdestruct_flow,
+)
 
+ENABLE_DEBUG_HOLD_FLAG = False
 DEBUG_FLAG_FILE = "debug_mode"
 
-TELEMETRY_START_DELAY_MS = 15000
-CFG_REFRESH_MS = 8000
 
-WAIT_POLL_MS = 25
+# ------------------------------------------------------------
+# Resolve button pin safely
+# ------------------------------------------------------------
 
-
-# ============================================================
-# GC helper
-# ============================================================
-def _gc():
+def _resolve_btn_pin_default():
     try:
-        import gc
-        gc.collect()
+        import src.hal.board as b
+        fn = getattr(b, "btn_pin", None)
+        if callable(fn):
+            return int(fn())
+        if hasattr(b, "BTN_PIN"):
+            return int(getattr(b, "BTN_PIN"))
     except Exception:
         pass
-
-
-def init_i2c_bus():
-    return I2C(0, scl=Pin(1), sda=Pin(0), freq=400000)
+    return 15
 
 
 # ============================================================
-# RUN
+# MAIN RUN
 # ============================================================
+
 def run(
         rtc_synced=None,
         wifi_boot=None,
@@ -51,99 +55,103 @@ def run(
         oled=None,
         air_sensor=None,
         boot_warmup_started=False,
-        rtc_info=None
+        rtc_info=None,
 ):
 
+    BTN_PIN = _resolve_btn_pin_default()
     enforce_debug_guard(btn_pin=BTN_PIN, debug_flag_file=DEBUG_FLAG_FILE)
 
     from config import load_config
     from src.input.button import AirBuddyButton
     from src.ui.waiting import WaitingScreen
-    from src.sensors.air import AirSensor
     from src.net.wifi_manager import WiFiManager
+    from src.app.gps_init import init_gps
 
     if oled is None:
         from src.ui.oled import OLED
         oled = OLED()
 
-    i2c = init_i2c_bus()
+    # ------------------------------------------------------------
+    # I2C (fixed freq)
+    # ------------------------------------------------------------
 
-    if isinstance(rtc_info, dict):
-        rtc = rtc_info
+    if init_i2c:
+        i2c = init_i2c()
     else:
-        from src.app.rtc_sync import sync_system_rtc_from_ds3231
-        rtc = sync_system_rtc_from_ds3231(i2c)
+        from machine import I2C, Pin
+        i2c = I2C(0, scl=Pin(1), sda=Pin(0), freq=400000)
 
-    gps = init_gps(
-        uart_id=GPS_UART_ID,
-        baud=GPS_BAUD,
-        tx_pin=GPS_TX_PIN,
-        rx_pin=GPS_RX_PIN
-    )
+    rtc = rtc_info if isinstance(rtc_info, dict) else {}
 
-    btn = AirBuddyButton(
-        gpio_pin=BTN_PIN,
-        click_window_s=1.4,
-        debounce_ms=50,
-        debug_hold_ms=2000
-    )
+    # ------------------------------------------------------------
+    # GPS INIT
+    # ------------------------------------------------------------
 
-    waiting = WaitingScreen()
-    air = air_sensor if air_sensor else AirSensor()
-    wifi = WiFiManager()
+    if gps_pins:
+        GPS_UART_ID, GPS_BAUD, GPS_TX_PIN, GPS_RX_PIN = gps_pins()
+    else:
+        GPS_UART_ID, GPS_BAUD, GPS_TX_PIN, GPS_RX_PIN = (1, 9600, 8, 9)
 
-    # --------------------------------------------------------
-    # STATUS FLAGS
-    # --------------------------------------------------------
-    status = {
-        "wifi_ok": bool(isinstance(wifi_boot, dict) and wifi_boot.get("ok")),
-        "gps_on": bool(gps),
-        "api_ok": bool(isinstance(api_boot, dict) and api_boot.get("ok")),
-    }
+    try:
+        gps = init_gps(
+            uart_id=GPS_UART_ID,
+            baud=GPS_BAUD,
+            tx_pin=GPS_TX_PIN,
+            rx_pin=GPS_RX_PIN,
+        )
+    except Exception:
+        gps = None
 
-    # --------------------------------------------------------
-    # CONFIG CACHE
-    # --------------------------------------------------------
-    _cfg = {}
-    _next_cfg_refresh = 0
+    gps_detected = False
 
-    def _refresh_cfg(force=False):
-        nonlocal _cfg, _next_cfg_refresh
-        now = time.ticks_ms()
-
-        if (not force) and time.ticks_diff(now, _next_cfg_refresh) < 0:
-            return _cfg
-
+    def _probe_gps():
+        nonlocal gps_detected
+        if gps is None:
+            gps_detected = False
+            return
         try:
-            c = load_config()
-            if isinstance(c, dict):
-                _cfg = c
+            if hasattr(gps, "any") and gps.any():
+                data = gps.read(32) or b""
+                if data:
+                    gps_detected = True
         except Exception:
             pass
 
-        _next_cfg_refresh = time.ticks_add(now, CFG_REFRESH_MS)
-        return _cfg
+    # ------------------------------------------------------------
+    # CORE OBJECTS
+    # ------------------------------------------------------------
 
-    cfg = _refresh_cfg(force=True)
+    btn = AirBuddyButton(
+        gpio_pin=BTN_PIN,
+        click_window_s=2.2,
+        debounce_ms=45,
+        debug_hold_ms=1500,
+    )
 
-    # --------------------------------------------------------
-    # TELEMETRY (deferred)
-    # --------------------------------------------------------
+    waiting = WaitingScreen()
+    wifi = WiFiManager()
+    air = air_sensor
+
+    status = {
+        "wifi_ok": bool(isinstance(wifi_boot, dict) and wifi_boot.get("ok")),
+        "api_ok": False,      # Now dynamic from telemetry
+        "gps_on": False,
+    }
+
+    # ------------------------------------------------------------
+    # TELEMETRY
+    # ------------------------------------------------------------
+
     telemetry = None
     telemetry_started = False
-    telemetry_ready_at = time.ticks_add(time.ticks_ms(), TELEMETRY_START_DELAY_MS)
 
-    def _start_telemetry_if_ready():
+    def start_telemetry_if_ready(cfg):
         nonlocal telemetry, telemetry_started
 
         if telemetry_started:
             return
 
-        if not bool(cfg.get("telemetry_enabled", True)):
-            telemetry_started = True
-            return
-
-        if time.ticks_diff(time.ticks_ms(), telemetry_ready_at) < 0:
+        if not status["wifi_ok"]:
             return
 
         try:
@@ -151,17 +159,42 @@ def run(
             telemetry = TelemetryState(
                 air_sensor=air,
                 rtc_info_getter=lambda: rtc,
-                wifi_manager=wifi
+                wifi_manager=wifi,
             )
-        except Exception:
-            telemetry = None
+            telemetry_started = True
+            print("[TELEMETRY] Started.")
+        except Exception as e:
+            print("[TELEMETRY] Failed to start:", repr(e))
 
-        telemetry_started = True
-        _gc()
+    def tick_telemetry(cfg):
+        nonlocal status
 
-    # --------------------------------------------------------
-    # LAZY SCREEN LOADER
-    # --------------------------------------------------------
+        if not telemetry:
+            return
+
+        try:
+            # Expect TelemetryState.tick to return True if sent,
+            # False if failed, None if nothing due.
+            result = telemetry.tick(cfg, rtc_dict=rtc)
+
+            if result is True:
+                if not status["api_ok"]:
+                    print("[TELEMETRY] Send OK")
+                status["api_ok"] = True
+
+            elif result is False:
+                if status["api_ok"]:
+                    print("[TELEMETRY] Send FAILED")
+                status["api_ok"] = False
+
+        except Exception as e:
+            print("[TELEMETRY] Tick error:", repr(e))
+            status["api_ok"] = False
+
+    # ------------------------------------------------------------
+    # SCREEN CACHE
+    # ------------------------------------------------------------
+
     screens = {}
 
     def get_screen(name):
@@ -169,7 +202,22 @@ def run(
             return screens[name]
 
         try:
-            if name == "co2":
+            if name == "device":
+                from src.ui.screens.device import DeviceScreen
+                screens[name] = DeviceScreen(oled)
+            elif name == "gps":
+                from src.ui.screens.gps import GPSScreen
+                screens[name] = GPSScreen(oled)
+            elif name == "wifi":
+                from src.ui.screens.wifi import WiFiScreen
+                screens[name] = WiFiScreen(oled)
+            elif name == "online":
+                from src.ui.screens.online import OnlineScreen
+                screens[name] = OnlineScreen(oled)
+            elif name == "logging":
+                from src.ui.screens.logging import LoggingScreen
+                screens[name] = LoggingScreen(oled)
+            elif name == "co2":
                 from src.ui.screens.co2 import CO2Screen
                 screens[name] = CO2Screen(oled)
             elif name == "tvoc":
@@ -184,35 +232,58 @@ def run(
             elif name == "time":
                 from src.ui.screens.time import TimeScreen
                 screens[name] = TimeScreen(oled)
-            elif name == "gps":
-                from src.ui.screens.gps import GPSScreen
-                screens[name] = GPSScreen(oled)
-            elif name == "wifi":
-                from src.ui.screens.wifi import WiFiScreen
-                screens[name] = WiFiScreen(oled)
-            elif name == "online":
-                from src.ui.screens.online import OnlineScreen
-                screens[name] = OnlineScreen(oled)
-            elif name == "logging":
-                from src.ui.screens.logging import LoggingScreen
-                screens[name] = LoggingScreen(oled)
+            elif name == "selfdestruct":
+                from src.ui.screens.selfdestruct import SelfDestructScreen
+                screens[name] = SelfDestructScreen(oled)
+            else:
+                screens[name] = None
         except Exception:
             screens[name] = None
-            _gc()
 
-        return screens.get(name)
+        _gc()
+        return screens[name]
 
     # ============================================================
     # MAIN LOOP
     # ============================================================
+
     while True:
 
-        cfg = _refresh_cfg(force=False)
-        _start_telemetry_if_ready()
+        cfg = load_config() or {}
 
-        # --------------------------------------------------------
-        # WAITING SCREEN (uses show_live — handles flush + heartbeat)
-        # --------------------------------------------------------
+        # --- WiFi live refresh ---
+        try:
+            status["wifi_ok"] = bool(wifi.is_connected())
+        except Exception:
+            status["wifi_ok"] = False
+
+        # --- GPS detection ---
+        try:
+            if cfg.get("gps_enabled", False):
+                _probe_gps()
+                status["gps_on"] = gps_detected
+            else:
+                status["gps_on"] = False
+        except Exception:
+            status["gps_on"] = False
+
+        # --- Telemetry start ---
+        start_telemetry_if_ready(cfg)
+
+        # ========================================================
+        # Idle callback (runs while waiting screen blocks)
+        # ========================================================
+
+        def _idle(now_ms):
+            try:
+                status["wifi_ok"] = bool(wifi.is_connected())
+            except Exception:
+                status["wifi_ok"] = False
+
+            start_telemetry_if_ready(cfg)
+            tick_telemetry(cfg)
+
+        # --- Waiting screen ---
         action = waiting.show_live(
             oled,
             btn,
@@ -221,53 +292,36 @@ def run(
             wifi_ok=status["wifi_ok"],
             gps_on=status["gps_on"],
             api_ok=status["api_ok"],
-            poll_ms=WAIT_POLL_MS
+            on_idle=_idle,
+            idle_every_ms=500,
         )
 
-        # --------------------------------------------------------
-        # HANDLE ACTION
-        # --------------------------------------------------------
-        if action == "quad":
-            machine.reset()
+        if action:
+            print("[CLICK]", action)
 
+        # --- Click routing ---
         if action == "triple":
-            # You can reinsert your settings carousel here
+            connectivity_carousel(
+                btn, oled, status, cfg, wifi,
+                None, None, gps,
+                get_screen,
+            )
+            continue
+
+        if action == "single":
+            sensor_carousel(btn, oled, air, get_screen)
             continue
 
         if action == "double":
-            ts = get_screen("time")
-            if ts:
-                from src.app.sysinfo import get_time_str, get_date_str
-
-                ts.show_live(
-                    get_date_str=get_date_str,
-                    get_time_str=get_time_str,
-                    get_source=lambda: "RTC",
-                    get_temp_c=lambda: rtc.get("temp_c"),
-                    btn=btn
-                )
+            time_flow(btn, oled, rtc, get_screen)
             continue
 
-        # --------------------------------------------------------
-        # SINGLE CLICK → SENSOR FLOW
-        # --------------------------------------------------------
-        if action == "single":
-            try:
-                reading = air.finish_sampling(log=False)
-            except Exception:
-                continue
+        if action == "quad":
+            selfdestruct_flow(btn, oled, get_screen)
+            continue
 
-            _gc()
+        if action == "debug":
+            machine.reset()
 
-            for name in ("co2", "tvoc", "temp"):
-                scr = get_screen(name)
-                if scr:
-                    scr.show(reading)
-                    while btn.pin.value() == 1:
-                        time.sleep_ms(10)
-
-            summ = get_screen("summary")
-            if summ:
-                summ.show_live(get_reading=lambda: reading, btn=btn)
-
-            _gc()
+        _reset_and_flush(btn)
+        _gc()

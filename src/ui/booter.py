@@ -29,7 +29,7 @@ class Booter:
 
         # Footer text in MED now
         self.f_footer = (
-                getattr(oled, "f_med", None)
+                getattr(oled, "f_small", None)
                 or getattr(oled, "f_arvo16", None)
                 or getattr(oled, "f_small", None)
         )

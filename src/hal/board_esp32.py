@@ -19,4 +19,11 @@ def init_i2c():
     return I2C(I2C_ID, scl=Pin(I2C_SCL), sda=Pin(I2C_SDA), freq=I2C_FREQ)
 
 def gps_pins():
-    return GPS_UART_ID, GPS_BAUD, GPS_TX_PIN, GPS_RX_PIN
+    return (1, 9600, 17, 16)  # adjust to your wiring
+
+
+
+def i2c_pins():
+    return (21, 22, 0, 400000)  # sda, scl, i2c_id, freq
+
+
