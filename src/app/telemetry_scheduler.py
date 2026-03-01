@@ -13,6 +13,11 @@
 # - Re-enable real-data gate to stop DB spam.
 # - Skip read_quick if sampling/warmup is in progress (avoid I2C collisions).
 #
+# FIX (UTC, Feb 2026):
+# - DO NOT use time.time() on RP2040 ports for UTC epoch.
+#   It may not be synced to machine.RTC().
+# - Derive Unix seconds from machine.RTC().datetime() via time.mktime().
+#
 # RAM NOTES (Pico W):
 # - Avoid heavy imports at top-level
 # - Prefer ujson lazily
@@ -127,10 +132,27 @@ class TelemetryScheduler:
         return self._client
 
     def _now_unix_seconds(self):
+        """
+        Return Unix seconds derived from machine.RTC() (UTC).
+
+        IMPORTANT:
+        - On RP2040 MicroPython, time.time()/gmtime() may NOT track machine.RTC().
+        - We assume machine.RTC() has been synced from DS3231 UTC at boot.
+        """
         try:
-            return int(time.time())
+            from machine import RTC
+            y, mo, d, wd, hh, mm, ss, sub = RTC().datetime()
+
+            # MicroPython mktime expects 8-tuple:
+            # (year, month, mday, hour, minute, second, weekday, yearday)
+            # weekday: 0=Mon..6=Sun on many ports; if it's off, it usually doesn't break epoch badly.
+            return int(time.mktime((y, mo, d, hh, mm, ss, wd, 0)))
         except Exception:
-            return 0
+            # Fallback (may be wrong on your port, but better than crashing)
+            try:
+                return int(time.time())
+            except Exception:
+                return 0
 
     def _sampling_in_progress(self):
         """
@@ -145,7 +167,6 @@ class TelemetryScheduler:
         try:
             wu = getattr(a, "_warmup_until", None)
             if wu is not None:
-                # warmup is active until it expires (finish_sampling clears it)
                 try:
                     if time.ticks_diff(time.ticks_ms(), wu) < 0:
                         return True
@@ -176,7 +197,6 @@ class TelemetryScheduler:
 
         # 1) AirReading/object path (preferred)
         if reading is not None and (not isinstance(reading, dict)):
-            # Pull known fields with getattr (no allocations)
             try:
                 eco2 = getattr(reading, "eco2_ppm", None)
                 tvoc = getattr(reading, "tvoc_ppb", None)
@@ -191,7 +211,6 @@ class TelemetryScheduler:
                 if tvoc is not None:
                     values["tvoc_ppb"] = int(tvoc)
                 if temp is not None:
-                    # keep as float but tiny
                     try:
                         values["temp_c"] = float(temp)
                     except Exception:
@@ -214,7 +233,6 @@ class TelemetryScheduler:
                     except Exception:
                         pass
             except Exception:
-                # fall through; may still try dict path below
                 pass
 
         # 2) dict path
@@ -250,7 +268,6 @@ class TelemetryScheduler:
             except Exception:
                 pass
 
-        # If still empty, mark as placeholder (used by gate)
         if not values:
             values["note"] = "no_reading"
 
@@ -267,25 +284,18 @@ class TelemetryScheduler:
         if values.get("note") == "no_reading":
             return False
 
-        # If ready flag exists and is False => skip
         if ("ready" in values) and (not bool(values.get("ready"))):
             return False
 
-        # Must have at least one meaningful numeric key
         eco2 = values.get("eco2_ppm", None)
         tvoc = values.get("tvoc_ppb", None)
         temp = values.get("temp_c", None)
         rh = values.get("rh", None)
 
-        # eco2: must be > 0
         if isinstance(eco2, (int, float)) and eco2 > 0:
             return True
-
-        # tvoc: allow >=0 (but require some other signal if 0)
         if isinstance(tvoc, (int, float)) and tvoc > 0:
             return True
-
-        # temp/rh alone are allowed, but only if they look sane
         if isinstance(temp, (int, float)) and (-20.0 <= float(temp) <= 80.0):
             return True
         if isinstance(rh, (int, float)) and (0.0 <= float(rh) <= 100.0):
@@ -330,7 +340,6 @@ class TelemetryScheduler:
 
         self._next_send_ms = time.ticks_add(now, interval_s * 1000)
 
-        # Debug: due
         self._dbg_count += 1
         do_print = (self._dbg_count % int(self._dbg_every_n)) == 0
         if do_print:
@@ -354,7 +363,7 @@ class TelemetryScheduler:
                 self._dbg_print("telemetry: skip (sampling in progress)")
             return
 
-        # Grab a quick reading (AirReading object)
+        # Grab a quick reading
         got_reading = False
         try:
             r = self.air.read_quick(source="telemetry")
@@ -383,7 +392,6 @@ class TelemetryScheduler:
                 self._dbg_print("telemetry: skip (rtc not epoch) t=", recorded_at)
             return
 
-        # ✅ REAL-DATA GATE (re-enabled)
         if not self._values_has_real_data(values):
             self.write_last_sent(recorded_at, ok=False)
             if do_print:
@@ -392,8 +400,11 @@ class TelemetryScheduler:
             return
 
         if do_print:
-            self._dbg_print("telemetry: sending", "reading=", "ok" if got_reading else "none",
-                            "values_len=", (len(values) if isinstance(values, dict) else 0))
+            self._dbg_print(
+                "telemetry: sending",
+                "reading=", "ok" if got_reading else "none",
+                "values_len=", (len(values) if isinstance(values, dict) else 0)
+            )
             self._dbg_values_sample(values, max_items=6)
 
         payload = {
@@ -414,7 +425,6 @@ class TelemetryScheduler:
         finally:
             _gc_collect()
 
-        # Always update last_sent (lets UI show attempts)
         self.write_last_sent(recorded_at, ok=bool(ok))
 
         if do_print:

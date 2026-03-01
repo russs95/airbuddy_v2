@@ -1,11 +1,12 @@
 # src/app/telemetry_payload.py — Build telemetry JSON payload (Pico / MicroPython safe)
 #
 # Centralizes the mapping from "reading + device state" -> payload dict.
-# This file is intentionally dependency-light so it can be used from scheduler/net code.
+# Dependency-light so it can be used from scheduler/net code.
 #
-# Typical usage (inside your scheduler/poster code):
-#   from src.app.telemetry_payload import build_payload
-#   payload = build_payload(reading=reading, rtc=rtc_dict, gps=gps_fix, cfg=cfg, device=device_meta)
+# KEY FIX (Feb 2026):
+# - Do NOT trust time.time()/time.gmtime() on RP2040 ports after RTC sync.
+# - Prefer deriving unix seconds from machine.RTC().datetime() using time.mktime().
+# - Only fall back to rtc dict unix keys or time.time() as last resort.
 
 import time
 
@@ -37,11 +38,81 @@ def _get(d, key, default=None):
     return default
 
 
+def _safe_mktime(dt8):
+    """
+    MicroPython mktime signature varies slightly by port.
+    We try a couple of tuple shapes.
+
+    Expected input:
+      (year, month, mday, hour, minute, second, weekday0, yearday)
+    weekday0: 0..6
+    """
+    try:
+        return int(time.mktime(dt8))
+    except Exception:
+        pass
+
+    try:
+        # Some ports accept: (y,mo,d,hh,mm,ss,0,0)
+        y, mo, d, hh, mm, ss, wd, yd = dt8
+        return int(time.mktime((int(y), int(mo), int(d), int(hh), int(mm), int(ss), 0, 0)))
+    except Exception:
+        return None
+
+
+def _rtc_datetime_utc():
+    """
+    Read machine.RTC().datetime() safely.
+    Returns (y,mo,d,wd0,hh,mm,ss) or None.
+    """
+    try:
+        from machine import RTC
+        dt = RTC().datetime()  # (y,mo,d,wd0,hh,mm,ss,subsec)
+        if not isinstance(dt, tuple) or len(dt) < 7:
+            return None
+        y, mo, d, wd0, hh, mm, ss = dt[0], dt[1], dt[2], dt[3], dt[4], dt[5], dt[6]
+        return (int(y), int(mo), int(d), int(wd0), int(hh), int(mm), int(ss))
+    except Exception:
+        return None
+
+
+def _rtc_unix_s_from_machine_rtc():
+    """
+    Best source on RP2040 Pico builds:
+      machine.RTC().datetime() -> time.mktime()
+    Returns int unix seconds or None.
+    """
+    dt = _rtc_datetime_utc()
+    if not dt:
+        return None
+
+    y, mo, d, wd0, hh, mm, ss = dt
+
+    # Build mktime tuple:
+    # (year, month, mday, hour, minute, second, weekday, yearday)
+    unix_s = _safe_mktime((y, mo, d, hh, mm, ss, wd0, 0))
+    if unix_s is None:
+        return None
+
+    # sanity check: epoch should be > 2001
+    if int(unix_s) < 1000000000:
+        return None
+
+    return int(unix_s)
+
+
 def _now_unix_s(rtc=None):
     """
-    Prefer RTC unix ts if your rtc dict carries it, otherwise fall back to time.time().
+    Prefer unix seconds derived from machine.RTC().datetime().
+    Fall back to rtc dict unix keys if present.
+    Finally fall back to time.time().
     """
-    # common patterns you may use later
+    # 1) Best: machine RTC -> mktime
+    u = _rtc_unix_s_from_machine_rtc()
+    if u is not None:
+        return u
+
+    # 2) If caller passed a live rtc dict carrying unix seconds
     for k in ("unix", "unix_s", "ts", "time_s"):
         v = _get(rtc, k)
         if v is not None:
@@ -49,10 +120,15 @@ def _now_unix_s(rtc=None):
             if iv is not None and iv > 1000000000:
                 return iv
 
+    # 3) Last resort: time.time()
     try:
-        return int(time.time())
+        t = int(time.time())
+        if t > 1000000000:
+            return t
     except Exception:
-        return None
+        pass
+
+    return None
 
 
 def build_payload(reading=None, rtc=None, gps=None, cfg=None, device=None, extra=None):
@@ -65,7 +141,7 @@ def build_payload(reading=None, rtc=None, gps=None, cfg=None, device=None, extra
         Expected to contain e.g. eco2_ppm, tvoc_ppb, temp_c, rh, aqi, etc.
         If it's an object, we'll try attribute access as a fallback.
     rtc : dict|None
-        RTC info dict from sync_system_rtc_from_ds3231(). (e.g. temp_c, synced, osf, unix, etc.)
+        RTC info dict from boot sync (temp_c, synced, osf, etc.). May be a snapshot.
     gps : dict|None
         Optional GPS fix dict (lat, lon, alt_m, sats, hdop, fix, etc.)
     cfg : dict|None
@@ -82,7 +158,7 @@ def build_payload(reading=None, rtc=None, gps=None, cfg=None, device=None, extra
     payload = {}
 
     # ----------------------------
-    # Time
+    # Time (UTC unix seconds)
     # ----------------------------
     payload["ts"] = _now_unix_s(rtc=rtc)
 
@@ -94,7 +170,6 @@ def build_payload(reading=None, rtc=None, gps=None, cfg=None, device=None, extra
         r = reading
     elif reading is not None:
         # attribute fallback for sensor classes that return objects
-        # (only grabs common fields; safe if missing)
         r = {
             "eco2_ppm": getattr(reading, "eco2_ppm", None),
             "tvoc_ppb": getattr(reading, "tvoc_ppb", None),
@@ -114,7 +189,7 @@ def build_payload(reading=None, rtc=None, gps=None, cfg=None, device=None, extra
     }
 
     # ----------------------------
-    # RTC info
+    # RTC info (snapshot)
     # ----------------------------
     payload["rtc"] = {
         "synced": bool(_get(rtc, "synced", False)),
@@ -149,11 +224,13 @@ def build_payload(reading=None, rtc=None, gps=None, cfg=None, device=None, extra
     # Device meta (optional)
     # ----------------------------
     if isinstance(device, dict):
-        # store only safe/light fields; keep it small for Pico uploads
         meta = {}
         for k in ("serial", "model", "fw", "hw", "buwana_id", "home_id", "device_id"):
-            if k in device and device.get(k) is not None:
-                meta[k] = device.get(k)
+            try:
+                if k in device and device.get(k) is not None:
+                    meta[k] = device.get(k)
+            except Exception:
+                pass
         if meta:
             payload["device"] = meta
 
@@ -163,7 +240,6 @@ def build_payload(reading=None, rtc=None, gps=None, cfg=None, device=None, extra
     if isinstance(extra, dict):
         try:
             for k, v in extra.items():
-                # don't clobber core keys unless you explicitly want to
                 if k not in payload:
                     payload[k] = v
         except Exception:

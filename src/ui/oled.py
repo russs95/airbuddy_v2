@@ -102,7 +102,7 @@ class OLED:
             pin_sda=None,
             pin_scl=None,
             freq=100_000,
-            col_offset=0,
+            col_offset=2,
     ):
         self.width = int(width)
         self.height = int(height)
@@ -148,7 +148,7 @@ class OLED:
 
     def _center_x(self, writer, text):
         w, _ = self._text_size(writer, text)
-        return max(0, (self.width - w) // 2)
+        return max(0, (self.width - w) // 12)
 
     def draw_centered(self, writer, text, y):
         x = self._center_x(writer, text)

@@ -1,10 +1,9 @@
-# src/app/main.py — AirBuddy 2.1 core loop (Revised)
+# src/app/main.py — AirBuddy 2.1 core loop (Revised + API two-state patch)
 
 import machine
 import time
 
 from src.app.boot_guard import enforce_debug_guard
-
 try:
     from src.hal.board import init_i2c, gps_pins
 except Exception:
@@ -26,10 +25,17 @@ from src.ui.flows import (
 ENABLE_DEBUG_HOLD_FLAG = False
 DEBUG_FLAG_FILE = "debug_mode"
 
+# ------------------------------------------------------------
+# DEBUG TUNING
+# ------------------------------------------------------------
+DEBUG_SCREENS = True   # set False once stable
 
 # ------------------------------------------------------------
-# Resolve button pin safely
+# API icon behavior tuning
 # ------------------------------------------------------------
+API_OK_HOLD_MS = 5 * 60 * 1000        # 5 minutes
+API_SENDING_HOLD_MS = 1200            # 1.2 seconds (visible)
+
 
 def _resolve_btn_pin_default():
     try:
@@ -44,10 +50,30 @@ def _resolve_btn_pin_default():
     return 15
 
 
+def _now_ms():
+    try:
+        return time.ticks_ms()
+    except Exception:
+        return int(time.time() * 1000)
+
+
+def _ticks_add(a, b):
+    try:
+        return time.ticks_add(a, b)
+    except Exception:
+        return a + b
+
+
+def _ticks_diff(a, b):
+    try:
+        return time.ticks_diff(a, b)
+    except Exception:
+        return a - b
+
+
 # ============================================================
 # MAIN RUN
 # ============================================================
-
 def run(
         rtc_synced=None,
         wifi_boot=None,
@@ -57,7 +83,6 @@ def run(
         boot_warmup_started=False,
         rtc_info=None,
 ):
-
     BTN_PIN = _resolve_btn_pin_default()
     enforce_debug_guard(btn_pin=BTN_PIN, debug_flag_file=DEBUG_FLAG_FILE)
 
@@ -74,19 +99,17 @@ def run(
     # ------------------------------------------------------------
     # I2C (fixed freq)
     # ------------------------------------------------------------
-
     if init_i2c:
         i2c = init_i2c()
     else:
         from machine import I2C, Pin
-        i2c = I2C(0, scl=Pin(1), sda=Pin(0), freq=400000)
+        i2c = I2C(0, scl=Pin(1), sda=Pin(0), freq=100000)
 
     rtc = rtc_info if isinstance(rtc_info, dict) else {}
 
     # ------------------------------------------------------------
     # GPS INIT
     # ------------------------------------------------------------
-
     if gps_pins:
         GPS_UART_ID, GPS_BAUD, GPS_TX_PIN, GPS_RX_PIN = gps_pins()
     else:
@@ -120,10 +143,9 @@ def run(
     # ------------------------------------------------------------
     # CORE OBJECTS
     # ------------------------------------------------------------
-
     btn = AirBuddyButton(
         gpio_pin=BTN_PIN,
-        click_window_s=2.2,
+        click_window_s=0.8,
         debounce_ms=45,
         debug_hold_ms=1500,
     )
@@ -132,28 +154,37 @@ def run(
     wifi = WiFiManager()
     air = air_sensor
 
+    # ------------------------------------------------------------
+    # STATUS STATE
+    # ------------------------------------------------------------
+    initial_wifi_ok = bool(isinstance(wifi_boot, dict) and wifi_boot.get("ok"))
+    initial_api_ok = bool(isinstance(api_boot, dict) and api_boot.get("ok"))
+
     status = {
-        "wifi_ok": bool(isinstance(wifi_boot, dict) and wifi_boot.get("ok")),
-        "api_ok": False,      # Now dynamic from telemetry
+        "wifi_ok": initial_wifi_ok,
+        "api_ok": initial_api_ok,
+        "api_sending": False,
         "gps_on": False,
     }
+
+    api_ok_until_ms = 0
+    api_sending_until_ms = 0
+
+    if initial_api_ok:
+        api_ok_until_ms = _ticks_add(_now_ms(), int(API_OK_HOLD_MS))
 
     # ------------------------------------------------------------
     # TELEMETRY
     # ------------------------------------------------------------
-
     telemetry = None
     telemetry_started = False
 
     def start_telemetry_if_ready(cfg):
         nonlocal telemetry, telemetry_started
-
         if telemetry_started:
             return
-
         if not status["wifi_ok"]:
             return
-
         try:
             from src.app.telemetry_state import TelemetryState
             telemetry = TelemetryState(
@@ -166,89 +197,191 @@ def run(
         except Exception as e:
             print("[TELEMETRY] Failed to start:", repr(e))
 
-    def tick_telemetry(cfg):
-        nonlocal status
+    def _refresh_api_flags(now_ms):
+        nonlocal api_ok_until_ms, api_sending_until_ms, status
 
+        try:
+            status["api_sending"] = (_ticks_diff(now_ms, api_sending_until_ms) < 0)
+        except Exception:
+            status["api_sending"] = False
+
+        if status["api_ok"]:
+            try:
+                if _ticks_diff(now_ms, api_ok_until_ms) >= 0:
+                    status["api_ok"] = False
+            except Exception:
+                pass
+
+    def tick_telemetry(cfg):
+        nonlocal status, api_ok_until_ms, api_sending_until_ms
         if not telemetry:
             return
 
+        now_ms = _now_ms()
         try:
-            # Expect TelemetryState.tick to return True if sent,
-            # False if failed, None if nothing due.
             result = telemetry.tick(cfg, rtc_dict=rtc)
 
             if result is True:
-                if not status["api_ok"]:
-                    print("[TELEMETRY] Send OK")
+                api_sending_until_ms = _ticks_add(now_ms, int(API_SENDING_HOLD_MS))
+                api_ok_until_ms = _ticks_add(now_ms, int(API_OK_HOLD_MS))
                 status["api_ok"] = True
 
             elif result is False:
-                if status["api_ok"]:
-                    print("[TELEMETRY] Send FAILED")
+                api_sending_until_ms = _ticks_add(now_ms, int(API_SENDING_HOLD_MS))
                 status["api_ok"] = False
+                api_ok_until_ms = 0
+
+            else:
+                # None => not due
+                pass
 
         except Exception as e:
             print("[TELEMETRY] Tick error:", repr(e))
             status["api_ok"] = False
+            api_ok_until_ms = 0
+
+        _refresh_api_flags(now_ms)
 
     # ------------------------------------------------------------
-    # SCREEN CACHE
+    # SCREEN CACHE + RUNNER
     # ------------------------------------------------------------
-
     screens = {}
 
+    def run_screen(name, **kwargs):
+        """
+        Debuggable screen invoker.
+        - Tries show_live(btn=...) if available
+        - Else tries show(...)
+        - Prints why it failed (MemoryError, import error, signature mismatch, etc.)
+        Returns action for show_live, else None.
+        """
+        scr = get_screen(name)
+        if scr is None:
+            if DEBUG_SCREENS:
+                print("[run_screen] missing:", name)
+            return None
+
+        # show_live preferred
+        if hasattr(scr, "show_live"):
+            try:
+                return scr.show_live(**kwargs)
+            except TypeError as e:
+                if DEBUG_SCREENS:
+                    print("[run_screen] show_live TypeError:", name, repr(e))
+            except MemoryError as e:
+                print("[run_screen] show_live MemoryError:", name, repr(e))
+            except Exception as e:
+                if DEBUG_SCREENS:
+                    print("[run_screen] show_live error:", name, repr(e))
+
+        # fallback show()
+        if hasattr(scr, "show"):
+            try:
+                return scr.show(**kwargs)
+            except TypeError as e:
+                if DEBUG_SCREENS:
+                    print("[run_screen] show TypeError:", name, repr(e))
+            except MemoryError as e:
+                print("[run_screen] show MemoryError:", name, repr(e))
+            except Exception as e:
+                if DEBUG_SCREENS:
+                    print("[run_screen] show error:", name, repr(e))
+
+        return None
+
     def get_screen(name):
-        if name in screens:
+        """
+        IMPORTANT FIX:
+        - If a screen previously failed and cached None, we RETRY.
+        - We also print the exception so we can see *why* temp/co2/tvoc failed.
+        """
+        if name in screens and screens[name] is not None:
             return screens[name]
 
+        # If it was cached as None, remove it so we can retry.
+        if name in screens and screens[name] is None:
+            try:
+                del screens[name]
+            except Exception:
+                pass
+
         try:
+            # NOTE: keep imports inside to reduce boot RAM.
             if name == "device":
                 from src.ui.screens.device import DeviceScreen
                 screens[name] = DeviceScreen(oled)
+
             elif name == "gps":
                 from src.ui.screens.gps import GPSScreen
                 screens[name] = GPSScreen(oled)
+
             elif name == "wifi":
                 from src.ui.screens.wifi import WiFiScreen
                 screens[name] = WiFiScreen(oled)
+
             elif name == "online":
                 from src.ui.screens.online import OnlineScreen
                 screens[name] = OnlineScreen(oled)
+
             elif name == "logging":
                 from src.ui.screens.logging import LoggingScreen
                 screens[name] = LoggingScreen(oled)
+
             elif name == "co2":
                 from src.ui.screens.co2 import CO2Screen
                 screens[name] = CO2Screen(oled)
+
             elif name == "tvoc":
                 from src.ui.screens.tvoc import TVOCScreen
                 screens[name] = TVOCScreen(oled)
+
             elif name == "temp":
                 from src.ui.screens.temp import TempScreen
                 screens[name] = TempScreen(oled)
+
             elif name == "summary":
                 from src.ui.screens.summary import SummaryScreen
                 screens[name] = SummaryScreen(oled)
+
             elif name == "time":
                 from src.ui.screens.time import TimeScreen
-                screens[name] = TimeScreen(oled)
+                # cfg is created in the loop, so it must exist when called
+                screens[name] = TimeScreen(
+                    oled,
+                    cfg,
+                    wifi_manager=wifi,
+                    rtc_info=rtc,
+                    ds3231=None,
+                )
+
             elif name == "selfdestruct":
                 from src.ui.screens.selfdestruct import SelfDestructScreen
                 screens[name] = SelfDestructScreen(oled)
+
             else:
                 screens[name] = None
-        except Exception:
-            screens[name] = None
+
+        except MemoryError as e:
+            print("[get_screen] MemoryError:", name, repr(e))
+            # Do NOT cache None permanently; allow retry later.
+            screens.pop(name, None)
+            _gc()
+            return None
+
+        except Exception as e:
+            print("[get_screen] failed:", name, repr(e))
+            # Do NOT cache failure permanently; allow retry later.
+            screens.pop(name, None)
+            _gc()
+            return None
 
         _gc()
-        return screens[name]
+        return screens.get(name)
 
     # ============================================================
     # MAIN LOOP
     # ============================================================
-
     while True:
-
         cfg = load_config() or {}
 
         # --- WiFi live refresh ---
@@ -270,10 +403,12 @@ def run(
         # --- Telemetry start ---
         start_telemetry_if_ready(cfg)
 
+        # keep api flags fresh even between sends
+        _refresh_api_flags(_now_ms())
+
         # ========================================================
         # Idle callback (runs while waiting screen blocks)
         # ========================================================
-
         def _idle(now_ms):
             try:
                 status["wifi_ok"] = bool(wifi.is_connected())
@@ -282,6 +417,13 @@ def run(
 
             start_telemetry_if_ready(cfg)
             tick_telemetry(cfg)
+
+            return {
+                "wifi_ok": status["wifi_ok"],
+                "gps_on": status["gps_on"],
+                "api_ok": status["api_ok"],
+                "api_sending": status["api_sending"],
+            }
 
         # --- Waiting screen ---
         action = waiting.show_live(
@@ -293,7 +435,7 @@ def run(
             gps_on=status["gps_on"],
             api_ok=status["api_ok"],
             on_idle=_idle,
-            idle_every_ms=500,
+            idle_every_ms=4000,   # <<<<< IMPORTANT: reduce load
         )
 
         if action:
@@ -309,11 +451,15 @@ def run(
             continue
 
         if action == "single":
+            # If temp/co2/tvoc missing, the improved get_screen() will now PRINT WHY.
             sensor_carousel(btn, oled, air, get_screen)
             continue
 
         if action == "double":
-            time_flow(btn, oled, rtc, get_screen)
+            # NOTE: time_flow signature expects ds3231; you're passing rtc dict.
+            # If your time_flow internally constructs TimeScreen via get_screen("time"),
+            # this still works. But leaving as-is can confuse debugging.
+            time_flow(btn, oled, cfg, wifi, None, get_screen)
             continue
 
         if action == "quad":

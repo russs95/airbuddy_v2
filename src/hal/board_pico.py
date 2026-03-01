@@ -10,7 +10,10 @@ from machine import Pin, I2C
 #   - GP15 -> button signal
 #   - GND28 -> ground
 BTN_PIN = 15
+BTN_LED_PIN = 18  # GP18 -> button LED control (output)
 
+def btn_led_pin():
+    return BTN_LED_PIN
 
 def btn_pin():
     """
@@ -18,6 +21,8 @@ def btn_pin():
     Kept as a function so src/app/main.py can call it consistently across boards.
     """
     return BTN_PIN
+
+
 
 
 # ------------------------------------------------------------

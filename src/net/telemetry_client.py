@@ -1,4 +1,13 @@
 # src/net/telemetry_client.py  (LOW-MEM, Pico-friendly)
+#
+# Updated:
+# - Reads tiny JSON response on success to extract server_now (unix seconds)
+# - Prints:
+#     True Sent
+#     Device Time : dd/mm/yy hh:mm:ss
+#     Server Time : dd/mm/yy hh:mm:ss
+#     Clock Drift : N seconds
+#     #########################################
 
 import time
 
@@ -45,6 +54,54 @@ class TelemetryClient:
     def last_error(self):
         return self._last_error or ""
 
+    # --------------------------------------------------
+    # Timestamp Formatter (Human Readable)
+    # --------------------------------------------------
+    def _fmt_epoch(self, epoch_s):
+        try:
+            t = time.localtime(int(epoch_s))
+            return "%02d/%02d/%02d %02d:%02d:%02d" % (
+                t[2], t[1], t[0] % 100,
+                t[3], t[4], t[5]
+            )
+        except Exception:
+            return str(epoch_s)
+
+    def _payload_ts(self, payload):
+        """Extract device timestamp (unix seconds) from payload."""
+        try:
+            if isinstance(payload, dict):
+                ts = payload.get("recorded_at", None)
+                if ts is None:
+                    ts = payload.get("ts", None)
+                return ts
+        except Exception:
+            pass
+        return None
+
+    def _print_send_stamp(self, payload, server_now=None, prefix="True Sent"):
+        """Print human readable device/server time + drift + separator."""
+        try:
+            ts = self._payload_ts(payload)
+
+            print(prefix)
+
+            if ts:
+                print("Device Time :", self._fmt_epoch(ts))
+
+            if server_now:
+                print("Server Time :", self._fmt_epoch(server_now))
+                if ts:
+                    try:
+                        drift = int(server_now) - int(ts)
+                        print("Clock Drift :", drift, "seconds")
+                    except Exception:
+                        pass
+
+            print("#########################################")
+        except Exception:
+            pass
+
     # ----------------------------
     # Queue Handling
     # ----------------------------
@@ -78,7 +135,6 @@ class TelemetryClient:
             if len(q) > int(max_items):
                 q = q[-int(max_items):]
         except Exception:
-            # if queue got weird, reset it
             q = [payload]
         self._save_queue(q)
 
@@ -86,11 +142,15 @@ class TelemetryClient:
     # HTTP Send (LOW MEM)
     # ----------------------------
     def _post(self, payload, timeout_s=8):
+        """
+        Returns:
+          (ok: bool, msg: str, server_now: int|None)
+        """
         if not requests:
-            return False, "no_urequests"
+            return False, "no_urequests", None
 
         if not self.device_id or not self.device_key:
-            return False, "missing_device_auth"
+            return False, "missing_device_auth", None
 
         headers = {
             "Content-Type": "application/json",
@@ -98,30 +158,37 @@ class TelemetryClient:
             "X-Device-Key": self.device_key,
         }
 
-        # Clean up before network work
         _gc_collect()
-
         j = _json()
 
         try:
-            # Build request body (this is the big allocation — keep payload compact!)
+            # Big allocation: JSON body string (keep payload compact)
             body = j.dumps(payload)
 
-            # Some urequests builds don't support timeout kwarg
             try:
                 r = requests.post(self.endpoint, data=body, headers=headers, timeout=int(timeout_s))
             except TypeError:
                 r = requests.post(self.endpoint, data=body, headers=headers)
 
-            # Free the big string ASAP
+            # free big string ASAP
             try:
                 del body
             except Exception:
                 pass
 
             status = getattr(r, "status_code", None)
+            server_now = None
 
-            # CRITICAL: do not read r.text / r.json()
+            # On success, try to read the small JSON response: { ok:true, server_now:<unix> }
+            if status is not None and 200 <= int(status) < 300:
+                try:
+                    data = r.json()
+                    if isinstance(data, dict):
+                        server_now = data.get("server_now", None)
+                except Exception:
+                    pass
+
+            # Always close response
             try:
                 r.close()
             except Exception:
@@ -135,29 +202,28 @@ class TelemetryClient:
             _gc_collect()
 
             if status is None:
-                return False, "no_status"
+                return False, "no_status", None
 
             if 200 <= int(status) < 300:
-                return True, "OK"
+                return True, "OK", server_now
 
-            return False, "HTTP {}".format(status)
+            return False, "HTTP {}".format(status), None
 
         except MemoryError:
             _gc_collect()
-            return False, "ENOMEM"
+            return False, "ENOMEM", None
 
         except OSError as e:
             _gc_collect()
-            # OSError(12) == ENOMEM (common)
             try:
                 code = e.args[0]
             except Exception:
                 code = "?"
-            return False, "EXC OSError({})".format(code)
+            return False, "EXC OSError({})".format(code), None
 
         except Exception as e:
             _gc_collect()
-            return False, "EXC {}".format(repr(e))
+            return False, "EXC {}".format(repr(e)), None
 
     # ----------------------------
     # Public Send
@@ -177,11 +243,14 @@ class TelemetryClient:
             retries = 3
 
         for _ in range(retries):
-            ok, msg = self._post(payload)
+            ok, msg, server_now = self._post(payload)
             last_msg = msg
             self._last_error = msg
 
             if ok:
+                # Print stamp UNDER "True Sent" with server drift
+                self._print_send_stamp(payload, server_now=server_now, prefix="True Sent")
+
                 # Only try a light flush. If anything fails, stop.
                 self.flush_queue(max_to_try=8)
                 return True, "sent"
@@ -219,21 +288,18 @@ class TelemetryClient:
                 continue
 
             tried += 1
-            ok, msg = self._post(item)
+            ok, msg, server_now = self._post(item)
             if not ok:
                 # keep this item and the rest; stop early
                 new_q.append(item)
                 self._last_error = msg
-                # append remaining untried items
-                # (avoids more _post calls)
-                idx = tried  # number tried so far
-                # since we can't easily resume iteration index in MicroPython,
-                # we just break and keep the rest by slicing q.
                 break
+            else:
+                # Print flush success stamp too (helps see backlog clearing)
+                self._print_send_stamp(item, server_now=server_now, prefix="True Sent (flush)")
 
-        # If we broke early, preserve remaining items
+        # Preserve any remaining items after the break
         if tried < len(q):
-            # We attempted 'tried' items; keep the remainder
             try:
                 remaining = q[tried:]
                 for it in remaining:

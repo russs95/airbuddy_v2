@@ -278,29 +278,43 @@ def draw_wifi9(fb, x, y, on=True, color=1):
     draw_wifi(fb, x, y, on=on, color=color)
 
 
+#
+# _GPS_6 = [
+#     "1111" "0" "1110" "0" "1111",
+#     "1000" "0" "1001" "0" "1000",
+#     "1011" "0" "1110" "0" "1111",
+#     "1001" "0" "1000" "0" "0001",
+#     "1001" "0" "1000" "0" "0001",
+#     "1111" "0" "1000" "0" "1111",
+# ]
+
 # ----------------------------
 # GPS indicator (14x6) — blocky "GPS"
 # ----------------------------
 
-_GPS_6 = [
-    "1111" "0" "1110" "0" "1111",
-    "1000" "0" "1001" "0" "1000",
-    "1011" "0" "1110" "0" "1111",
-    "1001" "0" "1000" "0" "0001",
-    "1001" "0" "1000" "0" "0001",
-    "1111" "0" "1000" "0" "1111",
+_GPS_TRI_6 = [
+    "00000000000001",
+    "00000000000011",
+    "00000000000111",
+    "00000000001111",
+    "00000000011111",
+    "00000000111111",
 ]
 
 
-def draw_gps(fb, x, y, color=1):
+def draw_gps(fb, x, y, on=True, color=1):
     """
-    Draw compact 6px-high 'GPS' at (x, y). Size: 14x6.
+    Draw 14x6 filled right-angle triangle when GPS is present.
+    If on=False -> draw nothing.
     """
-    draw_bitmap_rows(fb, x, y, _GPS_6, c=color)
+    if not on:
+        return
+
+    draw_bitmap_rows(fb, x, y, _GPS_TRI_6, c=color)
 
 
-def draw_gps9(fb, x, y, color=1):
-    draw_gps(fb, x, y, color=color)
+def draw_gps9(fb, x, y, on=True, color=1):
+    draw_gps(fb, x, y, on=on, color=color)
 
 
 # ----------------------------
@@ -324,10 +338,10 @@ _API_RING_6 = [
 
 _API_FILLED_6 = [
     "0011100",
-    "0111110",
     "1111111",
     "1111111",
-    "0111110",
+    "1111111",
+    "1111111",  # optional: was "0111110"
     "0011100",
 ]
 
@@ -376,9 +390,9 @@ def draw_api(fb, x, y, on=True, color=1, *, heartbeat=False, sending=False, now_
 
     Modes:
     - sending=True  -> filled + hole
-    - on=False      -> ring + solid dot
+    - on=False      -> ring ONLY (no center dot)
     - on=True:
-         heartbeat=True  -> alternates ring/dot <-> filled/hole
+         heartbeat=True  -> alternates ring <-> filled/hole
          heartbeat=False -> filled + hole (steady)
     """
     x = int(x)
@@ -401,5 +415,6 @@ def draw_api(fb, x, y, on=True, color=1, *, heartbeat=False, sending=False, now_
         _api_draw_center_dot(fb, x, y, on=False)
     else:
         draw_bitmap_rows(fb, x, y, _API_RING_6, c=color)
-        # Hollow circle gets SOLID center dot
-        _api_draw_center_dot(fb, x, y, on=True)
+        # OFFLINE: no dot (leave center untouched)
+        # (optional safety: explicitly clear it)
+        _api_draw_center_dot(fb, x, y, on=False)

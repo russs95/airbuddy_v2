@@ -10,14 +10,17 @@ class SelfDestructScreen:
     Quad click -> this screen.
 
     Sequence:
-      1) 4s: centered arvo20: "Self Destruct Protocol Initiated"
-      2) Countdown view:
+      1) 6s: centered arvo20 (3 lines):
+         SELF
+         DESTRUCT
+         INITIATED
+      2) Countdown view (20..0):
          - "STAND CLEAR 10M!" (med, centered)
          - countdown number (LARGE font, centered)
          - "CLICK TO ABORT" (med, centered)
-         If the user clicks, show "ERROR - ABORT FAILED" for 1s and continue countdown.
+         If the user clicks, show "ERROR--ABORT FAILED" for 1s and continue countdown.
       3) Punchline page with GRIN face glyph + "Just kidding!"
-         Face is constrained to TOP HALF of the OLED (so it never overlaps the text).
+         Face constrained to TOP HALF of the OLED.
     """
 
     def __init__(self, oled):
@@ -31,7 +34,11 @@ class SelfDestructScreen:
             x = max(0, (o.width - w) // 2)
         except Exception:
             x = 0
-        writer.write(text, x, y)
+        try:
+            writer.write(text, x, y)
+        except Exception:
+            # ultra-safe fallback: ignore write failure
+            pass
 
     def _wait_ms_abortable(self, btn, ms, treat_any_click_as_abort=True):
         """
@@ -39,13 +46,19 @@ class SelfDestructScreen:
         Returns True if a click happened during the wait.
         """
         start = time.ticks_ms()
-        while time.ticks_diff(time.ticks_ms(), start) < ms:
-            a = btn.poll_action()
+        while time.ticks_diff(time.ticks_ms(), start) < int(ms):
+            a = None
+            try:
+                a = btn.poll_action()
+            except Exception:
+                a = None
+
             if a is not None:
                 if not treat_any_click_as_abort:
                     return True
                 if a in ("single", "double", "triple", "quad"):
                     return True
+
             time.sleep_ms(25)
         return False
 
@@ -57,7 +70,7 @@ class SelfDestructScreen:
         # Top warning (MED, centered, ALL CAPS)
         self._center_text(o.f_med, "STAND CLEAR 10M!", 0)
 
-        # Big countdown number (use LARGE font from TimeScreen)
+        # Big countdown number (use LARGE font from TimeScreen if available)
         try:
             self._center_text(o.f_large, str(n), 18)
         except Exception:
@@ -77,27 +90,32 @@ class SelfDestructScreen:
         fb = o.oled
 
         # -------------------------------------------------
-        # 1) Intro view (4 seconds)
+        # 1) Intro view (6 seconds)
         # -------------------------------------------------
         fb.fill(0)
-        self._center_text(o.f_arvo20, "SELF", 18)
-        self._center_text(o.f_arvo20, "DESTRUCT", 24)
-        self._center_text(o.f_arvo16, "Has been initiated...", 38)
+
+        # Use Arvo20, three clean lines
+        # y positions chosen to center the 3-line block nicely on 64px OLED
+        self._center_text(o.f_arvo20, "SELF", 14)
+        self._center_text(o.f_arvo20, "DESTRUCT", 30)
+        self._center_text(o.f_arvo20, "INITIATED", 46)
+
         fb.show()
 
-        self._wait_ms_abortable(btn, 4000, treat_any_click_as_abort=False)
+        # Hold for 6 seconds (ignore clicks during intro)
+        self._wait_ms_abortable(btn, 6000, treat_any_click_as_abort=False)
         btn.reset()
 
         # -------------------------------------------------
-        # 2) Countdown view (10..0)
+        # 2) Countdown view (20..0)
         # -------------------------------------------------
-        abort_line = "Click to Abort"
-        for n in range(10, -1, -1):
+        abort_line = "CLICK TO ABORT"
+        for n in range(20, -1, -1):
             self._draw_countdown_view(n, abort_line)
 
             clicked = self._wait_ms_abortable(btn, 1000, treat_any_click_as_abort=True)
             if clicked:
-                abort_line = "ERROR--Abort Failed"
+                abort_line = "ERROR--ABORT FAILED"
                 self._draw_countdown_view(n, abort_line)
                 self._wait_ms_abortable(btn, 1000, treat_any_click_as_abort=False)
                 abort_line = "CLICK TO ABORT"
@@ -110,8 +128,6 @@ class SelfDestructScreen:
         fb.fill(0)
 
         top_h = max(24, int(o.height // 2))  # 32 on 64px OLED; never let it get tiny
-        # We'll draw face as if screen height is only top_h,
-        # which forces the face radius to fit that band.
         try:
             draw_face(fb, o.width, top_h, "grin", right_edge=False)
         except Exception:
@@ -129,8 +145,11 @@ class SelfDestructScreen:
                     pass
 
             # dot eyes
-            fb.fill_rect(cx - 7, cy - 5, 3, 3, 1)
-            fb.fill_rect(cx + 4, cy - 5, 3, 3, 1)
+            try:
+                fb.fill_rect(cx - 7, cy - 5, 3, 3, 1)
+                fb.fill_rect(cx + 4, cy - 5, 3, 3, 1)
+            except Exception:
+                pass
 
             # simple "D" grin
             x_left = cx - 10
@@ -142,12 +161,17 @@ class SelfDestructScreen:
                 fb.hline(x_left, y_top, (x_right - x_left), 1)
                 fb.hline(x_left, y_bot, (x_right - x_left), 1)
             except Exception:
-                # ultra-safe pixel fallback
                 for yy in range(y_top, y_bot + 1):
-                    fb.pixel(x_right, yy, 1)
+                    try:
+                        fb.pixel(x_right, yy, 1)
+                    except Exception:
+                        pass
                 for xx in range(x_left, x_right):
-                    fb.pixel(xx, y_top, 1)
-                    fb.pixel(xx, y_bot, 1)
+                    try:
+                        fb.pixel(xx, y_top, 1)
+                        fb.pixel(xx, y_bot, 1)
+                    except Exception:
+                        pass
 
         # Reserve bottom for text
         self._center_text(o.f_arvo20, "Just kidding!", 44)
@@ -156,7 +180,12 @@ class SelfDestructScreen:
         # Wait for click to exit
         btn.reset()
         while True:
-            a = btn.poll_action()
+            a = None
+            try:
+                a = btn.poll_action()
+            except Exception:
+                a = None
+
             if a in ("single", "double", "triple", "quad", "debug"):
                 return "next"
             time.sleep_ms(25)

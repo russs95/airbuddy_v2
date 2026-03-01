@@ -35,7 +35,7 @@ class Booter:
         )
 
         # Version (shown only at intro)
-        self.version = "version 2.1.16"
+        self.version = "version 2.1.19"
 
         # Logo orientation
         self.logo_flip_x = False

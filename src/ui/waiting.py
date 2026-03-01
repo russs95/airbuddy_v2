@@ -1,7 +1,17 @@
 # src/ui/waiting.py  (MicroPython / Pico-safe)
 #
-# SIMPLIFIED VERSION (NO HEARTBEAT ANIMATION)
-# + BACKGROUND IDLE HOOK FOR TELEMETRY
+# WAITING SCREEN
+# - airBuddy logo + tagline
+# - optional 3-dot animation
+# - top-right status icons: GPS  API  WIFI
+# - background idle hook (telemetry tick lives here)
+#
+# PATCH (Feb 2026 - stability + UI refresh):
+# - FIX: OLED refresh must call oled.oled.show() (NOT fb.show()).
+# - Reduce on_idle polling frequency to avoid RAM churn.
+# - Stop REPL spam (log only on entry; optional debug toggle).
+# - Always draw GPS icon (empty when not detected).
+# - API heartbeat only when api_ok=True (and WiFi ok), sending forces filled.
 
 import time
 import gc
@@ -33,8 +43,27 @@ class WaitingScreen:
         self.dots_period_ms = 1000
         self._last_dot_step = None
 
-        # ---- NEW: background idle scheduler ----
+        # background idle scheduler
         self._idle_next_ms = 0
+
+        # live status cache (updated by on_idle return)
+        self._wifi_ok = False
+        self._gps_on = False
+        self._api_ok = False
+
+        # optional "sending" pulse
+        self._api_sending_until_ms = 0
+        self.api_sending_hold_ms = 1200
+
+        # last-render state
+        self._last_wifi_ok = None
+        self._last_gps_on = None
+        self._last_api_ok = None
+        self._last_api_sending = None
+
+        # ---- DEBUG ----
+        # Keep False in normal runs; turn on temporarily if diagnosing.
+        self.log_status_checks = False
 
     # ============================================================
     # PUBLIC API (render once)
@@ -48,16 +77,26 @@ class WaitingScreen:
             *,
             wifi_ok=False,
             gps_on=False,
-            api_ok=False
+            api_ok=False,
+            api_sending=False,
     ):
+        self._wifi_ok = bool(wifi_ok)
+        self._gps_on = bool(gps_on)
+        self._api_ok = bool(api_ok)
+
+        if api_sending:
+            now = self._now_ms()
+            self._api_sending_until_ms = self._ticks_add(now, int(self.api_sending_hold_ms))
+
         self.render(
             oled,
             line=line,
             animate=animate,
             period_ms=period_ms,
-            wifi_ok=wifi_ok,
-            gps_on=gps_on,
-            api_ok=api_ok
+            wifi_ok=self._wifi_ok,
+            gps_on=self._gps_on,
+            api_ok=self._api_ok,
+            api_sending=self._is_api_sending(self._now_ms()),
         )
 
     # ============================================================
@@ -75,22 +114,28 @@ class WaitingScreen:
             gps_on=False,
             api_ok=False,
             poll_ms=25,
-            flush_ms=350,
-            on_idle=None,           # <-- NEW
-            idle_every_ms=500       # <-- NEW
+            flush_ms=220,
+            on_idle=None,
+            idle_every_ms=4000,   # <<<<< IMPORTANT: slow down background checks
     ):
         if period_ms is None:
             period_ms = int(self.dots_period_ms)
 
-        # Full render once
+        # seed live status
+        self._wifi_ok = bool(wifi_ok)
+        self._gps_on = bool(gps_on)
+        self._api_ok = bool(api_ok)
+
+        # initial render
         self.render(
             oled,
             line=line,
             animate=bool(animate),
             period_ms=period_ms,
-            wifi_ok=wifi_ok,
-            gps_on=gps_on,
-            api_ok=api_ok
+            wifi_ok=self._wifi_ok,
+            gps_on=self._gps_on,
+            api_ok=self._api_ok,
+            api_sending=self._is_api_sending(self._now_ms()),
         )
 
         self._last_dot_step = self._anim_step(period_ms) if animate else None
@@ -103,7 +148,7 @@ class WaitingScreen:
         except Exception:
             pass
 
-        # Flush stale click detections
+        # short flush of stale clicks
         try:
             t0 = time.ticks_ms()
             while time.ticks_diff(time.ticks_ms(), t0) < int(flush_ms):
@@ -115,12 +160,36 @@ class WaitingScreen:
         except Exception:
             pass
 
-        # ---- seed idle timer ----
-        try:
-            now = time.ticks_ms()
-            self._idle_next_ms = time.ticks_add(now, int(idle_every_ms))
-        except Exception:
-            self._idle_next_ms = 0
+        # schedule first background call
+        now = self._now_ms()
+        self._idle_next_ms = self._ticks_add(now, int(idle_every_ms))
+
+        # --------------------------------------------------------
+        # DO ONE STATUS CHECK ON ENTRY (and log once if enabled)
+        # --------------------------------------------------------
+        if on_idle is not None:
+            try:
+                ret = on_idle(now)
+                if self.log_status_checks:
+                    print("[WAITING] status check (entry) ->", ret)
+                self._apply_idle_ret(ret, now)
+            except Exception as e:
+                if self.log_status_checks:
+                    print("[WAITING] status check (entry) ERROR:", repr(e))
+
+        # force redraw after entry check
+        api_sending = self._is_api_sending(now)
+        self.render(
+            oled,
+            line=line,
+            animate=bool(animate),
+            period_ms=period_ms,
+            wifi_ok=self._wifi_ok,
+            gps_on=self._gps_on,
+            api_ok=self._api_ok,
+            api_sending=api_sending,
+        )
+        self._remember_last(api_sending)
 
         # ========================================================
         # WAIT LOOP
@@ -129,36 +198,55 @@ class WaitingScreen:
             now = self._now_ms()
 
             # ----------------------------------------------------
-            # 1) Background idle hook (telemetry tick lives here)
+            # 1) Background idle hook (RARE)
             # ----------------------------------------------------
             if on_idle is not None:
                 try:
-                    if time.ticks_diff(now, self._idle_next_ms) >= 0:
-                        on_idle(now)
-                        self._idle_next_ms = time.ticks_add(now, int(idle_every_ms))
+                    if self._ticks_diff(now, self._idle_next_ms) >= 0:
+                        ret = on_idle(now)
+                        # no spam by default
+                        if self.log_status_checks:
+                            print("[WAITING] status check ->", ret)
+
+                        self._apply_idle_ret(ret, now)
+                        self._idle_next_ms = self._ticks_add(now, int(idle_every_ms))
                 except Exception:
                     pass
 
+            api_sending = self._is_api_sending(now)
+
             # ----------------------------------------------------
-            # 2) Dots animation
+            # 2) Redraw only if needed
             # ----------------------------------------------------
+            redraw = False
+
             if animate:
                 try:
                     step = self._anim_step(period_ms)
                 except Exception:
                     step = None
-
                 if (step is not None) and (step != self._last_dot_step):
-                    self.render(
-                        oled,
-                        line=line,
-                        animate=True,
-                        period_ms=period_ms,
-                        wifi_ok=wifi_ok,
-                        gps_on=gps_on,
-                        api_ok=api_ok
-                    )
                     self._last_dot_step = step
+                    redraw = True
+
+            if (self._wifi_ok != self._last_wifi_ok or
+                    self._gps_on != self._last_gps_on or
+                    self._api_ok != self._last_api_ok or
+                    api_sending != self._last_api_sending):
+                redraw = True
+
+            if redraw:
+                self.render(
+                    oled,
+                    line=line,
+                    animate=bool(animate),
+                    period_ms=period_ms,
+                    wifi_ok=self._wifi_ok,
+                    gps_on=self._gps_on,
+                    api_ok=self._api_ok,
+                    api_sending=api_sending,
+                )
+                self._remember_last(api_sending)
 
             # ----------------------------------------------------
             # 3) Poll button
@@ -174,7 +262,72 @@ class WaitingScreen:
             time.sleep_ms(int(poll_ms))
 
     # ============================================================
-    # LOGO + DRAWING HELPERS
+    # Helpers
+    # ============================================================
+    def _remember_last(self, api_sending):
+        self._last_wifi_ok = self._wifi_ok
+        self._last_gps_on = self._gps_on
+        self._last_api_ok = self._api_ok
+        self._last_api_sending = api_sending
+
+    def _apply_idle_ret(self, ret, now_ms):
+        if not isinstance(ret, dict):
+            return
+        if "wifi_ok" in ret:
+            self._wifi_ok = bool(ret.get("wifi_ok"))
+        if "gps_on" in ret:
+            self._gps_on = bool(ret.get("gps_on"))
+        if "api_ok" in ret:
+            self._api_ok = bool(ret.get("api_ok"))
+
+        # hold pulse
+        if ret.get("api_sending", False):
+            self._api_sending_until_ms = self._ticks_add(now_ms, int(self.api_sending_hold_ms))
+
+    def _now_ms(self):
+        try:
+            return time.ticks_ms()
+        except Exception:
+            return int(time.time() * 1000)
+
+    def _ticks_add(self, a, b):
+        try:
+            return time.ticks_add(a, b)
+        except Exception:
+            return a + b
+
+    def _ticks_diff(self, a, b):
+        try:
+            return time.ticks_diff(a, b)
+        except Exception:
+            return a - b
+
+    def _elapsed_ms(self, now_ms):
+        if self._start_ms is None:
+            self._start_ms = now_ms
+            return 0
+        return self._ticks_diff(now_ms, self._start_ms)
+
+    def _anim_step(self, period_ms=1000):
+        elapsed = self._elapsed_ms(self._now_ms())
+        p = int(period_ms) or 1000
+        return int(elapsed // p) % 4
+
+    def _animated_line(self, base, period_ms=1000):
+        step = self._anim_step(period_ms)
+        if step == 0:
+            return base
+        if step == 1:
+            return base + "."
+        if step == 2:
+            return base + ".."
+        return base + "..."
+
+    def _is_api_sending(self, now_ms):
+        return self._ticks_diff(now_ms, self._api_sending_until_ms) < 0
+
+    # ============================================================
+    # LOGO
     # ============================================================
     def _get_logo_cached(self):
         if self._logo_lw is not None:
@@ -228,43 +381,9 @@ class WaitingScreen:
         return True
 
     # ============================================================
-    # Time helpers
-    # ============================================================
-    def _now_ms(self):
-        try:
-            return time.ticks_ms()
-        except Exception:
-            return int(time.time() * 1000)
-
-    def _elapsed_ms(self, now_ms):
-        if self._start_ms is None:
-            self._start_ms = now_ms
-            return 0
-        try:
-            return time.ticks_diff(now_ms, self._start_ms)
-        except Exception:
-            return now_ms - self._start_ms
-
-    def _anim_step(self, period_ms=1000):
-        now = self._now_ms()
-        elapsed = self._elapsed_ms(now)
-        p = int(period_ms) or 1000
-        return int(elapsed // p) % 4
-
-    def _animated_line(self, base, period_ms=1000):
-        step = self._anim_step(period_ms)
-        if step == 0:
-            return base
-        if step == 1:
-            return base + "."
-        if step == 2:
-            return base + ".."
-        return base + "..."
-
-    # ============================================================
     # Status icons
     # ============================================================
-    def _draw_status_icons(self, oled, wifi_ok=False, gps_on=False, api_ok=False):
+    def _draw_status_icons(self, oled, wifi_ok=False, gps_on=False, api_ok=False, api_sending=False):
         fb = getattr(oled, "oled", None)
         if fb is None:
             return
@@ -288,16 +407,33 @@ class WaitingScreen:
         x -= gap
 
         # API
+        # Heartbeat only if we *actually* consider API "healthy".
+        api_connected = bool(wifi_ok) and bool(api_ok)
+
         x -= API_W
         fb.fill_rect(x, y, API_W, API_H, 0)
-        draw_api(fb, x, y, on=bool(api_ok), heartbeat=False, sending=False, color=1)
+        draw_api(
+            fb, x, y,
+            on=api_connected,
+            heartbeat=api_connected,     # breathe when connected
+            sending=bool(api_sending),   # force filled during sends
+            color=1
+        )
         x -= gap
 
-        # GPS
-        if gps_on:
-            x -= GPS_W
-            fb.fill_rect(x, y, GPS_W, GPS_H, 0)
-            draw_gps(fb, x, y, color=1)
+        # GPS (ALWAYS draw; empty when gps_on False)
+        x -= GPS_W
+        fb.fill_rect(x, y, GPS_W, GPS_H, 0)
+        try:
+            # preferred: new signature with on=
+            draw_gps(fb, x, y, on=bool(gps_on), color=1)
+        except TypeError:
+            # fallback: legacy signature (will just draw one glyph)
+            if gps_on:
+                draw_gps(fb, x, y, color=1)
+            else:
+                # if legacy driver cannot draw "empty", we at least clear the box
+                pass
 
     # ============================================================
     # Full render
@@ -311,7 +447,8 @@ class WaitingScreen:
             *,
             wifi_ok=False,
             gps_on=False,
-            api_ok=False
+            api_ok=False,
+            api_sending=False
     ):
         fb = getattr(oled, "oled", None)
         if fb is None:
@@ -326,10 +463,11 @@ class WaitingScreen:
         if writer is None:
             return
 
-        self._draw_status_icons(oled, wifi_ok, gps_on, api_ok)
+        self._draw_status_icons(oled, wifi_ok, gps_on, api_ok, api_sending)
 
         base = (line or "").rstrip().rstrip(". ")
-        line_to_draw = base + "..." if not animate else self._animated_line(base, period_ms)
+        p = int(period_ms) or 1000
+        line_to_draw = base + "..." if not animate else self._animated_line(base, p)
 
         lw, lh, data = self._get_logo_cached()
         use_logo = (lw > 0 and lh > 0 and lw <= ow and lh <= oh and data is not None)
@@ -359,9 +497,19 @@ class WaitingScreen:
         except Exception:
             x = 0
 
-        writer.write(line_to_draw, x, int(line_y))
+        try:
+            writer.write(line_to_draw, x, int(line_y))
+        except Exception:
+            pass
 
-        fb.show()
+        # CRITICAL FIX: show must be called on the OLED driver, not framebuffer
+        try:
+            oled.oled.show()
+        except Exception:
+            try:
+                fb.show()
+            except Exception:
+                pass
 
         try:
             gc.collect()

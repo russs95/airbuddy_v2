@@ -5,15 +5,23 @@
 #  - Uses src.hal.board for I2C + GPS pins (Pico vs ESP32)
 #  - OLED class now uses HAL by default (your patched src/ui/oled.py)
 #
-# Patch notes (root):
-#  - Keep this file self-contained and tolerant of missing modules
-#  - Use LOW-RAM device lookup client when available (src/net/device_client.py)
-#  - Do NOT depend on any WaitingScreen.show_live() (root only renders once)
+# Focused patch (ESP32 stability):
+#  - Move WiFi earlier to avoid heap fragmentation (ESP32 WiFi PHY alloc crash)
+#  - Delay heavy allocations (AirSensor) until AFTER WiFi attempt
+#  - Add gc.collect() before WiFi init
+#  - Shorten WiFi timeout + reduce retries for fast fail
+#  - Hold each boot step on OLED for 0.5s (so errors are readable)
+#  - If btn_pin missing in HAL, show message and stop instead of crashing
 
 from machine import RTC
 import time
 
 from src.hal.board import init_i2c, gps_pins
+
+# ----------------------------
+# Boot pacing
+# ----------------------------
+BOOT_STEP_HOLD_MS = 500  # hold each step so OLED text is readable
 
 
 # ----------------------------
@@ -28,6 +36,13 @@ def _gc():
         gc.collect()
     except Exception:
         pass
+
+
+def _sleep_hold():
+    try:
+        time.sleep_ms(int(BOOT_STEP_HOLD_MS))
+    except Exception:
+        time.sleep(BOOT_STEP_HOLD_MS / 1000)
 
 
 def _hex_list(addrs):
@@ -52,14 +67,12 @@ def i2c_scan():
 I2C_ADDR_OLED = 0x3C
 I2C_ADDR_RTC = 0x68
 I2C_ADDR_ENS160 = 0x53
-I2C_ADDR_AHT2X = 0x38  # AHT20/AHT21 often
+I2C_ADDR_AHT2X = 0x38  # AHT10/AHT20/AHT21 often
 
 
 # ----------------------------
 # OLED init
 # ----------------------------
-
-
 def init_oled():
     try:
         from src.ui.oled import OLED
@@ -71,7 +84,6 @@ def init_oled():
     except Exception as e:
         print("OLED:init failed:", repr(e))
         return None
-
 
 
 # ----------------------------
@@ -88,49 +100,35 @@ def load_cfg_dict():
 
 
 # ----------------------------
-# RTC Sync
+# RTC Sync (UTC)
 # ----------------------------
 def sync_rtc_from_ds3231():
-    """
-    Sync system RTC from DS3231 if detected on I2C.
-    If not detected, do NOT treat as failure.
-    """
-    info = {"ok": False, "synced": False, "temp_c": None, "detected": False}
-
+    info = {"ok": False, "synced": False, "detected": False, "utc": True, "dt_utc": None, "temp_c": None}
     try:
-        addrs = i2c_scan()
-        if I2C_ADDR_RTC not in addrs:
-            # Not wired / not present
-            info["detected"] = False
-            return True, "NOT DETECTED", info
-
-        # Detected: attempt sync
-        info["detected"] = True
         i2c = init_i2c()
-
-        from src.drivers.ds3231 import DS3231
-        ds = DS3231(i2c)
-
-        year, month, day, weekday, hour, minute, sec = ds.datetime()
-        wd0 = (weekday - 1) % 7
-        RTC().datetime((year, month, day, wd0, hour, minute, sec, 0))
-
+        addrs = []
         try:
-            info["temp_c"] = ds.temperature()
+            addrs = i2c.scan() or []
         except Exception:
             pass
 
-        info["ok"] = True
-        info["synced"] = True
+        if I2C_ADDR_RTC not in addrs:
+            info["detected"] = False
+            return False, "NOT DETECTED", info
 
-        print("RTC synced:", (year, month, day, hour, minute, sec))
-        return True, "OK", info
+        info["detected"] = True
 
-    except Exception as e:
-        # Real error (detected but failed)
-        info["ok"] = False
-        info["synced"] = False
-        return True, "ERROR", info  # keep boot pipeline non-fatal
+        from src.app.rtc_sync import sync_system_rtc_from_ds3231
+        out = sync_system_rtc_from_ds3231(i2c, tz_offset_s=0)  # DS3231 kept in UTC
+
+        info["ok"] = bool(out.get("ok"))
+        info["synced"] = bool(out.get("synced"))
+        info["temp_c"] = out.get("temp_c")
+        info["dt_utc"] = out.get("dt_utc")
+        return bool(info["synced"]), ("OK" if info["synced"] else "ERROR"), info
+
+    except Exception:
+        return False, "ERROR", info
 
 
 # ----------------------------
@@ -156,7 +154,7 @@ def api_device_lookup(cfg):
     if not device_id or not device_key:
         return False, "No device keys", info
 
-    # --- Preferred path: your new compact client ---
+    # --- Preferred path: compact client ---
     try:
         from src.net.device_client import lookup_device_compact
         ok, data, err = lookup_device_compact(api_base, device_id, device_key, timeout_s=6)
@@ -170,7 +168,6 @@ def api_device_lookup(cfg):
         info["ok"] = True
         return True, "device confirmed", info
     except Exception:
-        # fall back to legacy inline implementation below
         pass
 
     # --- Fallback: legacy inline (kept for safety) ---
@@ -202,7 +199,6 @@ def api_device_lookup(cfg):
         if code != 200:
             return False, "HTTP {}".format(code if code is not None else "?"), info
 
-        # STREAM PARSE (no r.text)
         data = json.load(r.raw)
 
         if not isinstance(data, dict) or not data.get("ok"):
@@ -240,12 +236,6 @@ def api_device_lookup(cfg):
 # GPS check (end of boot)
 # ----------------------------
 def gps_boot_check(cfg):
-    """
-    Lightweight GPS presence check so WaitingScreen can show GPS status.
-    We do NOT keep the GPS object; src/app/main.py will init it for real.
-
-    If enabled but no GPS data arrives, report NOT DETECTED (non-fatal).
-    """
     info = {"ok": False, "enabled": False, "detected": False}
 
     try:
@@ -260,7 +250,6 @@ def gps_boot_check(cfg):
         info["detected"] = False
         return True, "GPS off", info
 
-    # Enabled: try init + see any bytes briefly
     gps = None
     try:
         _gc()
@@ -276,28 +265,22 @@ def gps_boot_check(cfg):
             info["detected"] = False
             return True, "NOT DETECTED", info
 
-        # Probe: see if any bytes arrive
-        try:
-            start = time.ticks_ms()
-            seen = False
-            while time.ticks_diff(time.ticks_ms(), start) < 1200:
-                try:
-                    if gps.any():
-                        b = gps.read(64) or b""
-                        if b:
-                            seen = True
-                            break
-                except Exception:
-                    pass
-                time.sleep_ms(50)
+        start = time.ticks_ms()
+        seen = False
+        while time.ticks_diff(time.ticks_ms(), start) < 1200:
+            try:
+                if gps.any():
+                    b = gps.read(64) or b""
+                    if b:
+                        seen = True
+                        break
+            except Exception:
+                pass
+            time.sleep_ms(50)
 
-            info["detected"] = bool(seen)
-            info["ok"] = bool(seen)
-            return True, ("OK" if seen else "NOT DETECTED"), info
-        except Exception:
-            info["detected"] = False
-            info["ok"] = False
-            return True, "NOT DETECTED", info
+        info["detected"] = bool(seen)
+        info["ok"] = bool(seen)
+        return True, ("OK" if seen else "NOT DETECTED"), info
 
     except Exception:
         info["ok"] = False
@@ -340,12 +323,8 @@ wifi_boot = None
 api_boot = None
 gps_boot = None
 
+# IMPORTANT: delay AirSensor creation until AFTER WiFi attempt on ESP32
 air = None
-try:
-    from src.sensors.air import AirSensor
-    air = AirSensor()
-except Exception as e:
-    print("AIR init failed:", repr(e))
 
 try:
     from src.ui.booter import Booter
@@ -364,45 +343,11 @@ def step_load_config():
     return (cfg is not None), ("Config OK" if cfg else "Config FAIL")
 
 
-def step_rtc():
-    global rtc_info
-    ok, detail, info = sync_rtc_from_ds3231()
-    rtc_info = info
-    return True, "RTC clock -> {}".format(detail) if detail not in ("OK", "ERROR", "NOT DETECTED") else detail
-    # Note: Booter prints label separately; we return just the status text.
-
-
-def step_warmup():
-    """
-    Only warm up if ENS160/AHT appears on I2C.
-    """
-    if air is None:
-        return True, "NO SENSORS DETECTED"
-
-    addrs = i2c_scan()
-    has_air = (I2C_ADDR_ENS160 in addrs) or (I2C_ADDR_AHT2X in addrs)
-
-    if not has_air:
-        return True, "NO SENSORS DETECTED"
-
-    # root boot only *starts* warmup; src/app/main.py will finish sampling later
-    try:
-        warmup_s = float(cfg.get("warmup_seconds", 4.0) if cfg else 4.0)
-    except Exception:
-        warmup_s = 4.0
-
-    try:
-        air.begin_sampling(warmup_seconds=warmup_s, source="boot")
-        return True, "Warmup {:.0f}s".format(warmup_s)
-    except Exception:
-        return True, "WARMUP ERROR"  # non-fatal
-
-
 def step_wifi():
     """
-    Graceful WiFi handling:
-      - NOT SUPPORTED on non-WiFi boards
-      - otherwise attempt connect
+    ESP32-safe WiFi boot:
+      - gc.collect() before WiFi init to reduce fragmentation
+      - fast-fail timeout to avoid 60s boot stalls
     """
     global wifi_boot
     wifi_boot = {"ok": False, "supported": False}
@@ -422,17 +367,19 @@ def step_wifi():
     if not supported:
         return True, "NOT SUPPORTED"
 
-    # WiFi supported: use real manager
+    # WiFi supported: connect (FAST FAIL)
     try:
+        _gc()
         from src.net.wifi_manager import WiFiManager
         wifi = WiFiManager()
 
         ok, ip, status = wifi.connect(
             cfg.get("wifi_ssid", ""),
             cfg.get("wifi_password", ""),
-            timeout_s=10,
-            retry=1
+            timeout_s=4,   # was 10; faster fail
+            retry=0        # was 1; avoid long retry storm
         )
+
         wifi_boot = {"ok": bool(ok), "supported": True, "ip": ip, "status": status}
         return True, ("OK" if ok else "FAIL")
     except Exception as e:
@@ -442,8 +389,6 @@ def step_wifi():
 
 def step_api():
     global api_boot
-
-    # If no wifi or unsupported, skip cleanly
     if not (isinstance(wifi_boot, dict) and wifi_boot.get("supported") and wifi_boot.get("ok")):
         api_boot = {"ok": False}
         return True, "SKIPPED (No WiFi)"
@@ -453,6 +398,57 @@ def step_api():
     return True, ("OK" if ok else detail)
 
 
+def step_rtc():
+    global rtc_info
+    ok, detail, info = sync_rtc_from_ds3231()
+    rtc_info = info
+
+    if not info.get("detected"):
+        return True, "NOT DETECTED"
+
+    if info.get("synced"):
+        return True, "OK"
+
+    return True, "SYNC FAIL"
+
+
+def step_warmup():
+    """
+    Only warm up if ENS160/AHT appears on I2C.
+
+    NOTE: We lazily construct AirSensor here to avoid heap fragmentation
+    before WiFi init on ESP32.
+    """
+    global air
+
+    addrs = i2c_scan()
+    has_air = (I2C_ADDR_ENS160 in addrs) or (I2C_ADDR_AHT2X in addrs)
+
+    if not has_air:
+        return True, "NO SENSORS DETECTED"
+
+    if air is None:
+        try:
+            _gc()
+            from src.sensors.air import AirSensor
+            air = AirSensor()
+        except Exception as e:
+            print("AIR init failed:", repr(e))
+            air = None
+            return True, "AIR INIT FAIL"
+
+    try:
+        warmup_s = float(cfg.get("warmup_seconds", 4.0) if cfg else 4.0)
+    except Exception:
+        warmup_s = 4.0
+
+    try:
+        air.begin_sampling(warmup_seconds=warmup_s, source="boot")
+        return True, "Warmup {:.0f}s".format(warmup_s)
+    except Exception:
+        return True, "WARMUP ERROR"  # non-fatal
+
+
 def step_gps():
     global gps_boot
     ok, detail, info = gps_boot_check(cfg)
@@ -460,12 +456,13 @@ def step_gps():
     return True, detail
 
 
+# Reordered: WiFi earlier (ESP32 heap stability) + API right after WiFi
 steps = [
-    ("Loading config", step_load_config),
-    ("RTC clock", step_rtc),
-    ("Warming sensors...", step_warmup),
+    ("Loading config...", step_load_config),
     ("Connecting to WiFi...", step_wifi),
     ("Device API check...", step_api),
+    ("RTC clock...", step_rtc),
+    ("Warming sensors...", step_warmup),
     ("GPS check...", step_gps),
 ]
 
@@ -475,7 +472,7 @@ if booter:
             steps,
             intro_ms=500,
             fps=18,
-            settle_ms=0,
+            settle_ms=BOOT_STEP_HOLD_MS,  # <-- hold each step on OLED
             logger=_log
         )
     except Exception as e:
@@ -488,24 +485,50 @@ else:
             _log("[BOOT] {} -> {}".format(label, detail))
         except Exception as e:
             _log("[BOOT] {} -> ERROR {}".format(label, repr(e)))
+        _sleep_hold()  # <-- hold each step even without OLED
 
 
 # Show waiting immediately after boot (single render)
 go_waiting(oled, wifi_boot=wifi_boot, api_boot=api_boot, gps_boot=gps_boot)
 
 
-# Launch app loop
+# ------------------------------------------------------------
+# Preflight: Button HAL must exist (avoid crash loop)
+# ------------------------------------------------------------
+_btn_hal_ok = True
 try:
-    from src.app.main import run
-    run(
-        rtc_synced=bool(rtc_info and rtc_info.get("synced")),
-        wifi_boot=wifi_boot,
-        api_boot=api_boot,
-        oled=oled,
-        air_sensor=air,
-        boot_warmup_started=True,
-        rtc_info=rtc_info
-    )
+    from src.hal.board import btn_pin  # noqa: F401
 except Exception as e:
-    print("AirBuddy boot error:", repr(e))
-    raise
+    _btn_hal_ok = False
+    msg = "HAL missing btn_pin()"
+    print(msg, repr(e))
+    # Try show on OLED and stop so you can fix HAL without reboot loop
+    try:
+        if oled:
+            from src.ui.waiting import WaitingScreen
+            WaitingScreen().show(oled, line=msg, animate=False, wifi_ok=False, gps_on=False, api_ok=False)
+            _sleep_hold()
+    except Exception:
+        pass
+
+
+# Launch app loop
+if _btn_hal_ok:
+    try:
+        from src.app.main import run
+        run(
+            rtc_synced=bool(rtc_info and rtc_info.get("synced")),
+            wifi_boot=wifi_boot,
+            api_boot=api_boot,
+            oled=oled,
+            air_sensor=air,
+            boot_warmup_started=True,
+            rtc_info=rtc_info
+        )
+    except Exception as e:
+        print("AirBuddy boot error:", repr(e))
+        raise
+else:
+    # Stop cleanly at REPL so you can patch src/hal/board_esp32.py
+    while True:
+        time.sleep(5)

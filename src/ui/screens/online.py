@@ -1,10 +1,10 @@
-# src/ui/screens/online.py
+# src/ui/screens/online.py  (MicroPython / Pico-safe)
 
 import time
 import gc
 from machine import RTC
 
-from config import load_config
+from config import load_config, save_config
 from src.ui.toggle import ToggleSwitch
 from src.net.telemetry_client import TelemetryClient
 from src.net.wifi_manager import WiFiManager
@@ -15,15 +15,25 @@ class OnlineScreen:
         self.oled = oled
         self.wifi = WiFiManager()
 
-        # Same vertical toggle as WiFi screen
-        self.toggle = ToggleSwitch(x=100, y=6, w=24, h=52)
+        self._top_pad = 5
 
-        self.cfg = load_config()
+        # Clamp toggle to screen bounds
+        w = int(getattr(oled, "width", 128))
+        h = int(getattr(oled, "height", 64))
 
-        self.api_base = self.cfg.get("api_base", "http://air.earthen.io")
-        self.device_id = self.cfg.get("device_id", "")
-        self.device_key = self.cfg.get("device_key", "")
-        self.username = self.cfg.get("username", "")  # from your config.json (optional)
+        tx = 100
+        ty = 6 + self._top_pad
+        tw = 24
+        th = 52
+
+        if tx + tw > w:
+            tw = max(1, w - tx)
+        if ty + th > h:
+            th = max(1, h - ty)
+
+        self.toggle = ToggleSwitch(x=tx, y=ty, w=tw, h=th)
+
+        self._load_cfg()
 
         self.client = TelemetryClient(
             api_base=self.api_base,
@@ -31,69 +41,79 @@ class OnlineScreen:
             device_key=self.device_key
         )
 
-        # User setting: whether telemetry feature is enabled
-        self._online_enabled = bool(self.cfg.get("telemetry_enabled", True))
-
-        # UI state
         self._status = ""
         self._detail = ""
-        self._connected = False  # IMPORTANT: controls toggle rendering (starts OFF)
+        self._connected = False
 
-        # Connecting animation state
         self._connecting = False
         self._dot_phase = 0
         self._next_anim_ms = 0
 
-        # handshake scheduling (single-shot)
         self._handshake_pending = False
         self._next_handshake_ms = 0
 
     # ----------------------------
+    # Config
+    # ----------------------------
+
+    def _load_cfg(self):
+        self.cfg = load_config()
+        self.api_base = self.cfg.get("api_base", "http://air.earthen.io")
+        self.device_id = self.cfg.get("device_id", "")
+        self.device_key = self.cfg.get("device_key", "")
+        self._online_enabled = bool(self.cfg.get("telemetry_enabled", True))
+
+    def _save_enabled(self):
+        self.cfg["telemetry_enabled"] = self._online_enabled
+        save_config(self.cfg)
+
+    # ----------------------------
     # Drawing
     # ----------------------------
+
     def _draw(self):
         o = self.oled
         fb = o.oled
         fb.fill(0)
 
-        title_y = 6
+        title_y = 6 + self._top_pad
         o.f_arvo20.write("Online", 0, title_y)
 
-        # "| API" in arvo16, moved DOWN 4px and LEFT 3px from previous placement
         try:
             title_w, _ = o._text_size(o.f_arvo20, "Online")
         except Exception:
             title_w = 70
 
         api_font = getattr(o, "f_arvo16", None) or o.f_med
-        api_font.write("| API", title_w + 3, title_y + 3)  # was (title_w + 6, title_y - 1)
+        api_font.write("| API", title_w + 3, title_y + 3)
 
-        # Main area
         if self._connected:
-            # Connected view: 3 lines (MED, MED, SMALL)
-            o.f_med.write(("user: " + (self.username or "?"))[:18], 0, 28)
-            o.f_med.write(("device: " + (self.device_id or "?"))[:18], 0, 42)
+            # Removed USER line (as requested)
+            o.f_med.write(("device: " + (self.device_id or "?"))[:18], 0, 32 + self._top_pad)
 
-            # api_base in SMALL (fallback to MED)
             try:
-                o.f_small.write((self.api_base or "")[:21], 0, 54)
+                o.f_small.write((self.api_base or "")[:21], 0, 48 + self._top_pad)
             except Exception:
-                o.f_med.write((self.api_base or "")[:18], 0, 54)
+                o.f_med.write((self.api_base or "")[:18], 0, 48 + self._top_pad)
 
         else:
-            # Not connected view: status + detail in MED
-            o.f_med.write(self._status[:18], 0, 32)
+            o.f_med.write((self._status or "")[:18], 0, 34 + self._top_pad)
             if self._detail:
-                o.f_med.write(self._detail[:18], 0, 46)
+                o.f_med.write((self._detail or "")[:18], 0, 48 + self._top_pad)
 
-        # Toggle shows CONNECTED state, not "enabled" setting
         self.toggle.draw(fb, on=self._connected)
-
         fb.show()
 
     # ----------------------------
     # Helpers
     # ----------------------------
+
+    def _wifi_ok(self):
+        try:
+            return bool(self.wifi.is_connected())
+        except Exception:
+            return False
+
     def _now_unix_seconds(self):
         y, mo, d, wd, hh, mm, ss, sub = RTC().datetime()
         try:
@@ -101,21 +121,13 @@ class OnlineScreen:
         except Exception:
             return int(time.time())
 
-    def _clean_detail(self, msg):
-        s = (msg or "").strip()
-        low = s.lower()
-        if low.startswith("queued:"):
-            s = s.split(":", 1)[1].strip()
-        elif low.startswith("queued"):
-            s = s[5:].strip(" :")
-        return s
+    # ----------------------------
+    # Connecting animation
+    # ----------------------------
 
-    # ----------------------------
-    # Connecting animation (non-blocking)
-    # ----------------------------
     def _set_connecting(self, on):
         self._connecting = bool(on)
-        if self._connecting:
+        if on:
             self._dot_phase = 0
             self._next_anim_ms = time.ticks_ms()
 
@@ -127,12 +139,9 @@ class OnlineScreen:
         if time.ticks_diff(now, self._next_anim_ms) < 0:
             return
 
-        # 0.4s per step
         self._next_anim_ms = time.ticks_add(now, 400)
-
         self._dot_phase = (self._dot_phase + 1) % 4
         dots = "." * self._dot_phase
-
         self._status = "Connecting" + dots
         self._detail = ""
         self._draw()
@@ -140,29 +149,27 @@ class OnlineScreen:
     # ----------------------------
     # Handshake
     # ----------------------------
+
     def _request_handshake(self, delay_ms=0):
         self._handshake_pending = True
-        self._next_handshake_ms = time.ticks_add(time.ticks_ms(), int(delay_ms))
+        self._next_handshake_ms = time.ticks_add(time.ticks_ms(), delay_ms)
 
     def _handshake(self):
-        # Always start as NOT connected until proven otherwise
         self._connected = False
         self._detail = ""
 
         if not self._online_enabled:
-            self._status = "Online OFF"
-            self._detail = ""
+            self._status = "API OFF"
             self._draw()
             return
 
-        if not self.wifi.is_connected():
+        if not self._wifi_ok():
             self._status = "No WiFi"
-            self._detail = ""
             self._draw()
             return
 
         gc.collect()
-        time.sleep_ms(200)
+        time.sleep_ms(150)
 
         payload = {
             "recorded_at": self._now_unix_seconds(),
@@ -171,74 +178,69 @@ class OnlineScreen:
         }
 
         ok, msg = self.client.send(payload)
-        print("telemetry:", ok, msg)
 
         if ok:
-            # Confirmed connection
             self._connected = True
-            self._set_connecting(False)
             self._status = ""
             self._detail = ""
         else:
-            # Still not connected
             self._connected = False
             self._status = "Queued"
-            self._detail = self._clean_detail(msg)[:18]
+            self._detail = str(msg or "")[:18]
 
         self._draw()
 
     # ----------------------------
     # Public
     # ----------------------------
+
     def show_live(self, btn):
         btn.reset()
+        self._load_cfg()
 
-        # Toggle should start OFF visually until we prove connectivity
         self._connected = False
 
         if not self._online_enabled:
-            self._status = "Online OFF"
-            self._detail = ""
+            self._status = "API OFF"
             self._set_connecting(False)
             self._draw()
         else:
             self._set_connecting(True)
             self._status = "Connecting"
-            self._detail = ""
             self._draw()
-            self._request_handshake(delay_ms=600)
+            self._request_handshake(600)
 
         while True:
             self._tick_connecting()
 
-            action = btn.poll_action()
+            try:
+                action = btn.poll_action()
+            except Exception:
+                action = None
+
             if action == "single":
-                return "single"
+                return "single"   # → Logging screen
 
             if action == "double":
-                # Toggle feature on/off (and reset connection state)
-                self._online_enabled = not self._online_enabled
+                # Double click = turn OFF API connection
+                self._online_enabled = False
+                self._save_enabled()
                 self._connected = False
+                self._set_connecting(False)
+                self._handshake_pending = False
+                self._status = "API OFF"
+                self._detail = ""
+                self._draw()
+                btn.reset()
 
-                if not self._online_enabled:
-                    self._set_connecting(False)
-                    self._handshake_pending = False
-                    self._status = "Online OFF"
-                    self._detail = ""
-                    self._draw()
-                else:
-                    self._set_connecting(True)
-                    self._status = "Connecting"
-                    self._detail = ""
-                    self._draw()
-                    self._request_handshake(delay_ms=300)
+            if action == "quad":
+                return "quad"
 
-            # run scheduled handshake once
             if self._online_enabled and self._handshake_pending:
                 now = time.ticks_ms()
                 if time.ticks_diff(now, self._next_handshake_ms) >= 0:
-                    self._set_connecting(False)
                     self._handshake_pending = False
+                    self._set_connecting(False)
                     self._handshake()
 
             time.sleep_ms(25)

@@ -1,248 +1,366 @@
-# src/ui/screens/time.py — Time + RTC info screen (Pico / MicroPython safe)
+# src/ui/screens/time.py
 
 import time
+import json
+import gc
+import machine
+
 from src.ui.glyphs import draw_circle, draw_degree
+
+try:
+    import urequests
+except Exception:
+    urequests = None
+
+CONFIG_FILE = "config.json"
+
+MONTHS = [
+    "January","February","March","April","May","June",
+    "July","August","September","October","November","December"
+]
 
 
 class TimeScreen:
-    MONTHS = (
-        "January", "February", "March", "April", "May", "June",
-        "July", "August", "September", "October", "November", "December"
-    )
-
-    def __init__(self, oled):
+    def __init__(self, oled, cfg, wifi_manager=None, rtc_info=None, ds3231=None):
         self.oled = oled
+        self.cfg = cfg
 
-        # Colon tweak:
-        # We hide the font ":" and draw our own colon, OFFSET from the font position.
-        # Positive values move the colon DOWN.
-        self.COLON_OFFSET_PX = 3  # ✅ lower by 6px
+        # Optional helpers
+        self.wifi = wifi_manager
+        self.rtc_info = rtc_info if isinstance(rtc_info, dict) else {}
+        self.ds3231 = ds3231
 
-    # ----------------------------
-    # Formatting
-    # ----------------------------
-    def _suffix(self, day):
-        if 11 <= (day % 100) <= 13:
-            return "th"
-        last = day % 10
-        return "st" if last == 1 else "nd" if last == 2 else "rd" if last == 3 else "th"
+        # API refresh happens once per screen open
+        self._tz_checked = False
 
-    def _pretty_date(self, date_str):
+    # -------------------------------------------------
+    # RTC / tuples
+    # -------------------------------------------------
+    def _get_utc_tuple(self):
+        # System RTC is expected to be UTC
+        return time.localtime()
+
+    def _get_user_time_tuple(self):
+        offset_min = self.cfg.get("timezone_offset_min", None)
+        if offset_min is None:
+            return None
+
         try:
-            if not date_str or date_str.startswith("--"):
-                return "--"
-            parts = date_str.split("/")
-            if len(parts) != 3:
-                return date_str
-            d = int(parts[0]); m = int(parts[1]); y = int(parts[2])
-            if not (1 <= m <= 12 and 1 <= d <= 31):
-                return date_str
-            return "{} {}{}, {}".format(self.MONTHS[m - 1], d, self._suffix(d), y)
+            offset_min = int(offset_min)
         except Exception:
-            return date_str
+            return None
 
-    def _blink_time(self, time_str, blink_on=True):
-        # Turn ":" into " " when blink is off
-        if not time_str or time_str.startswith("--"):
-            return time_str
-        if ":" in time_str:
-            return time_str if blink_on else time_str.replace(":", " ", 1)
-        return time_str
+        utc_ts = time.time()
+        local_ts = utc_ts + (offset_min * 60)
+        return time.localtime(local_ts)
 
-    # ----------------------------
-    # Drawing blocks
-    # ----------------------------
-    def _draw_bottom_left_source(self, source, y):
-        source = (source or "SYS").upper()
-        filled = (source == "RTC")
-        label = "RTC" if filled else "SYS"
+    def _sync_rtc_from_server_ts(self, ts_ms):
+        """
+        Set system RTC to UTC using server epoch milliseconds.
+        Safe no-op on any error.
+        """
+        try:
+            epoch_s = int(ts_ms) // 1000
+            y, mo, d, hh, mm, ss, wday, _ = time.gmtime(epoch_s)
+            machine.RTC().datetime((y, mo, d, wday, hh, mm, ss, 0))
+        except Exception:
+            pass
 
-        cx = 9
-        cy = y + 5
+    # -------------------------------------------------
+    # API refresh (once) + offline-safe gating
+    # -------------------------------------------------
+    def _refresh_from_api_once(self):
+        if self._tz_checked:
+            return
+        self._tz_checked = True
+
+        if not urequests:
+            return
+
+        if not self.cfg.get("wifi_enabled", False):
+            return
+
+        # Require actual WiFi connection (prevents blocking offline)
+        if self.wifi:
+            try:
+                if not self.wifi.is_connected():
+                    return
+            except Exception:
+                return
+
+        api_base = self.cfg.get("api_base")
+        device_id = self.cfg.get("device_id")
+        device_key = self.cfg.get("device_key")
+
+        if not (api_base and device_id and device_key):
+            return
+
+        url = api_base.rstrip("/") + "/v1/device?compact=1"
+        headers = {
+            "X-Device-Id": str(device_id),
+            "X-Device-Key": str(device_key),
+        }
+
+        resp = None
+        try:
+            gc.collect()
+            resp = urequests.get(url, headers=headers, timeout=4)
+
+            if resp.status_code != 200:
+                return
+
+            data = resp.json()
+            if not isinstance(data, dict) or not data.get("ok"):
+                return
+
+            # timezone offset update (cache in config.json)
+            tz_off = data.get("timezone_offset_min", None)
+            if tz_off is None:
+                tz_off = data.get("tz_offset_min", None)
+
+            if tz_off is not None:
+                try:
+                    tz_off = int(tz_off)
+
+                    old = self.cfg.get("timezone_offset_min", None)
+                    try:
+                        old = int(old) if old is not None else None
+                    except Exception:
+                        old = None
+
+                    if old != tz_off:
+                        self.cfg["timezone_offset_min"] = tz_off
+                        with open(CONFIG_FILE, "w") as f:
+                            json.dump(self.cfg, f)
+                except Exception:
+                    pass
+
+            # RTC sync from server epoch
+            ts_ms = data.get("ts", None)
+            if ts_ms is not None:
+                self._sync_rtc_from_server_ts(ts_ms)
+
+        except Exception:
+            pass
+        finally:
+            try:
+                if resp:
+                    resp.close()
+            except Exception:
+                pass
+            gc.collect()
+
+    # -------------------------------------------------
+    # Formatting helpers
+    # -------------------------------------------------
+    def _ordinal(self, n):
+        if 10 <= n % 100 <= 20:
+            suf = "th"
+        else:
+            suf = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+        return str(n) + suf
+
+    def _fmt_date_long(self, t):
+        day = self._ordinal(int(t[2]))
+        month = MONTHS[int(t[1]) - 1]
+        year = int(t[0])
+        return "{} {}, {}".format(month, day, year)
+
+    def _fmt_time_blink(self, t):
+        # clean 1Hz blink: colon visible on even seconds
+        s = int(t[5])
+        colon = ":" if (s % 2 == 0) else " "
+        return "{:02d}{}{:02d}".format(int(t[3]), colon, int(t[4]))
+
+    # -------------------------------------------------
+    # UI helpers
+    # -------------------------------------------------
+    def _is_rtc_detected(self):
+        try:
+            return bool(self.rtc_info.get("detected"))
+        except Exception:
+            return False
+
+    def _draw_top_right_rtc_glyph(self, y=2):
+        """
+        Small circle glyph next to the date (top-right).
+        Filled when RTC is detected (or you can invert if you prefer).
+        """
+        fb = getattr(self.oled, "oled", None)
+        if fb is None:
+            return
+
         r = 4
-        draw_circle(self.oled.oled, cx, cy, r=r, filled=filled, color=1)
-        self.oled.f_med.write(label, 18, y)
+        filled = self._is_rtc_detected()
 
-    def _draw_bottom_right_temp(self, temp_c, y):
-        """
-        Draw: 25.3°C in MED, 1 decimal
-        Degree ring is pixel glyph; C is font.
-        """
-        if temp_c is None:
+        # Position: right edge, with a tiny margin
+        cx = int(self.oled.width) - (r + 2)
+        cy = int(y) + (r + 1)
+
+        draw_circle(fb, cx, cy, r=r, filled=filled, color=1)
+
+    # -------------------------------------------------
+    # Bottom row
+    # -------------------------------------------------
+    def _draw_bottom_left_temp(self, y):
+        fb = getattr(self.oled, "oled", None)
+
+        # Build temperature string (number only here; we draw degree glyph manually)
+        temp_val = None
+
+        if self.ds3231:
+            try:
+                temp_val = float(self.ds3231.temperature())
+            except Exception:
+                temp_val = None
+
+        if temp_val is None:
+            try:
+                tv = self.rtc_info.get("temp_c", None)
+                if tv is not None:
+                    temp_val = float(tv)
+            except Exception:
+                temp_val = None
+
+        if temp_val is None:
+            # fallback plain
+            self.oled.f_med.write("--.- C", 2, y)
             return
+
+        # Write number
+        num_str = "{:.1f}".format(temp_val)
+        x = 2
+        self.oled.f_med.write(num_str, x, y)
+
+        # Compute where to draw the degree ring + "C"
         try:
-            t = round(float(temp_c), 1)
+            w_num, _ = self.oled._text_size(self.oled.f_med, num_str)
         except Exception:
-            return
+            w_num = len(num_str) * 8  # rough fallback
 
-        t_text = "{:.1f}".format(t)
-        w_t, _ = self.oled._text_size(self.oled.f_med, t_text)
-        w_c, _ = self.oled._text_size(self.oled.f_med, "C")
+        # Degree glyph
+        if fb is not None:
+            # Place degree ring just after number, slightly above baseline
+            deg_x = x + int(w_num) + 1
+            deg_y = y + 2
+            draw_degree(fb, deg_x, deg_y, r=2, color=1)
 
-        deg_r = 2
-        deg_w = deg_r * 2 + 1
-        total_w = w_t + 1 + deg_w + 1 + w_c
+            # Now write "C" after degree ring with a small gap
+            self.oled.f_med.write("C", deg_x + 7, y)
 
-        x0 = max(0, self.oled.width - total_w - 2)
+    def _draw_bottom_right_utc(self, y):
+        utc = self._get_utc_tuple()
+        utc_str = "{:02d}:{:02d} UTC".format(int(utc[3]), int(utc[4]))
 
-        self.oled.f_med.write(t_text, x0, y)
+        w, _ = self.oled._text_size(self.oled.f_med, utc_str)
+        x = max(0, self.oled.width - w - 2)
+        self.oled.f_med.write(utc_str, x, y)
 
-        x_deg = x0 + w_t + 1
-        y_deg = y + 2
-        draw_degree(self.oled.oled, x_deg, y_deg, r=deg_r, color=1)
-
-        x_c = x_deg + deg_w + 1
-        self.oled.f_med.write("C", x_c, y)
-
-    # ----------------------------
-    # Colon override
-    # ----------------------------
-    def _find_colon_x(self, time_str, y_time):
-        """
-        Compute x position of the first ":" in the centered LARGE time string.
-        Returns (colon_x, colon_w, text_x0) or (None, None, None).
-        """
-        if not time_str or ":" not in time_str:
-            return None, None, None
-
-        # Measure using the LARGE font used for the main time.
-        w_full, _ = self.oled._text_size(self.oled.f_large, time_str)
-        x0 = max(0, (self.oled.width - int(w_full)) // 2)
-
-        idx = time_str.find(":")
-        left = time_str[:idx]
-        w_left, _ = self.oled._text_size(self.oled.f_large, left)
-
-        w_colon, _ = self.oled._text_size(self.oled.f_large, ":")
-
-        colon_x = x0 + int(w_left)
-        return int(colon_x), int(w_colon), int(x0)
-
-    def _draw_colon_override(self, time_str, y_time):
-        """
-        Hide the font's colon (by blanking its area), then draw a 2-dot colon with an offset.
-        Positive offset moves DOWN.
-        """
-        if not time_str or ":" not in time_str:
-            return
-
-        colon_x, colon_w, _ = self._find_colon_x(time_str, y_time)
-        if colon_x is None:
-            return
-
-        if colon_w <= 0:
-            colon_w = 6
-
-        _, h_large = self.oled._text_size(self.oled.f_large, "88:88")
-        self.oled.oled.fill_rect(colon_x, y_time, colon_w, int(h_large), 0)
-
-        mid_y = y_time + int(h_large // 2)
-        dot_x = colon_x + max(0, (colon_w // 2) - 1)
-
-        offset_px = int(self.COLON_OFFSET_PX)
-
-        # Two 2x2 dots
-        self.oled.oled.fill_rect(dot_x, mid_y - 8 + offset_px, 2, 2, 1)
-        self.oled.oled.fill_rect(dot_x, mid_y + 2 + offset_px, 2, 2, 1)
-
-    # ----------------------------
+    # -------------------------------------------------
     # Render
-    # ----------------------------
-    def _render(self, date_str, time_str, source="SYS", temp_c=None, blink_on=True):
+    # -------------------------------------------------
+    def _render(self):
         self.oled.oled.fill(0)
 
-        # --- Top: pretty date (MED) ---
-        pretty = self._pretty_date(date_str)
-        _, h_med = self.oled._text_size(self.oled.f_med, pretty)
-        self.oled.draw_centered(self.oled.f_med, pretty, 0)
+        user_t = self._get_user_time_tuple()
 
-        # --- Bottom row layout (MED height) ---
+        if user_t is None:
+            date_str = "NO:TZ"
+            time_str = "NO:TZ"
+        else:
+            date_str = self._fmt_date_long(user_t)
+            time_str = self._fmt_time_blink(user_t)
+
+        # Top date (centered)
+        self.oled.draw_centered(self.oled.f_med, date_str, 0)
+
+        # RTC circle glyph at top-right, adjacent to date row
+        self._draw_top_right_rtc_glyph(y=1)
+
+        # Main time: TRUE centered (no width-jitter when colon blinks)
+        # Use a fixed-width reference "88:88" for centering math.
+        w_ref, h_ref = self.oled._text_size(self.oled.f_large, "88:88")
+        x_time = max(0, (self.oled.width - w_ref) // 2)
+        y_time = max(0, (self.oled.height - h_ref) // 2)
+
+        try:
+            self.oled.f_large.write(time_str, x_time, y_time)
+        except Exception:
+            # fallback to draw_centered if writer write fails
+            self.oled.draw_centered(self.oled.f_large, time_str, y_time)
+
+        # Bottom row
         _, h_bottom = self.oled._text_size(self.oled.f_med, "Ag")
-        y_bottom = max(0, self.oled.height - h_bottom - 1)
+        y_bottom = self.oled.height - h_bottom - 1
 
-        # --- Center: time (LARGE, with blinking colon) ---
-        t_disp = self._blink_time(time_str, blink_on=blink_on)
-
-        # Compute vertical placement for LARGE time
-        _, h_large = self.oled._text_size(self.oled.f_large, "88:88")
-        top_block = h_med + 2
-        bottom_block = y_bottom - 1
-        available = max(0, bottom_block - top_block)
-        y_time = top_block + max(0, (available - h_large) // 2)
-
-        # Draw LARGE time (hours/minutes) using oled.f_large
-        self.oled.draw_centered(self.oled.f_large, t_disp, y_time)
-
-        # If blink is ON, we want ":" visible — but overridden.
-        if blink_on and time_str and (":" in time_str):
-            self._draw_colon_override(time_str, y_time)
-
-        # --- Bottom-left/source + bottom-right/temp ---
-        self._draw_bottom_left_source(source, y_bottom)
-        self._draw_bottom_right_temp(temp_c, y_bottom)
+        self._draw_bottom_left_temp(y_bottom)
+        self._draw_bottom_right_utc(y_bottom)
 
         self.oled.oled.show()
 
-    # ----------------------------
-    # Public: static show
-    # ----------------------------
-    def show(self, date_str, time_str, source="SYS", temp_c=None):
-        self._render(date_str, time_str, source=source, temp_c=temp_c, blink_on=True)
+    # -------------------------------------------------
+    # Public
+    # -------------------------------------------------
+    def show_live(self, btn=None, max_seconds=8):
+        # Try API once on entry; safe no-op offline
+        self._refresh_from_api_once()
 
-    # ----------------------------
-    # Public: live show with blink + exit on click
-    # ----------------------------
-    def show_live(
-            self,
-            get_date_str,
-            get_time_str,
-            get_source,
-            get_temp_c,
-            btn=None,
-            max_seconds=8,
-            blink_ms=500,
-            refresh_every_blinks=2
-    ):
-        """
-        Live time screen:
-          - Blinks every blink_ms
-          - Refreshes data every refresh_every_blinks blinks
-          - Exits immediately on ANY click if btn provided
-        """
-        start = time.ticks_ms()
-        blink_on = True
-        blink_count = 0
+        start_ms = time.ticks_ms()
 
-        date_str = get_date_str()
-        time_str = get_time_str()
-        source = get_source()
-        temp_c = get_temp_c()
-
-        hold_forever = (max_seconds is None) or (max_seconds <= 0)
-
-        while True:
-            blink_on = not blink_on
-            blink_count += 1
-
-            if blink_count % max(1, int(refresh_every_blinks)) == 0:
-                date_str = get_date_str()
-                time_str = get_time_str()
-                source = get_source()
-                temp_c = get_temp_c()
-
-            self._render(date_str, time_str, source=source, temp_c=temp_c, blink_on=blink_on)
-
-            wait_start = time.ticks_ms()
-            while time.ticks_diff(time.ticks_ms(), wait_start) < int(blink_ms):
-                if btn is not None:
+        # Entry settle: drain any tail click so user can exit immediately
+        if btn:
+            try:
+                t0 = time.ticks_ms()
+                while time.ticks_diff(time.ticks_ms(), t0) < 120:
                     try:
-                        action = btn.poll_action()
-                        if action:
-                            return action
+                        btn.poll_action()
                     except Exception:
                         pass
-                time.sleep_ms(20)
+                    time.sleep_ms(15)
+            except Exception:
+                pass
 
-            if not hold_forever:
-                if time.ticks_diff(time.ticks_ms(), start) >= int(max_seconds * 1000):
+        # Redraw throttling: update when the second changes (or at least every 350ms)
+        last_sec = None
+        last_draw_ms = 0
+
+        # Poll fast so short taps register
+        poll_ms = 25
+        min_redraw_ms = 350
+
+        while True:
+            now_ms = time.ticks_ms()
+
+            # --- Fast button polling ---
+            if btn:
+                try:
+                    action = btn.poll_action()
+                except Exception:
+                    action = None
+                if action:
+                    return action
+
+            # --- Decide whether to redraw ---
+            try:
+                utc = time.localtime()
+                sec = int(utc[5])
+            except Exception:
+                sec = None
+
+            redraw = False
+            if sec is not None and sec != last_sec:
+                redraw = True
+                last_sec = sec
+            elif time.ticks_diff(now_ms, last_draw_ms) >= min_redraw_ms:
+                redraw = True
+
+            if redraw:
+                self._render()
+                last_draw_ms = now_ms
+
+            # --- Exit timer ---
+            if max_seconds:
+                if time.ticks_diff(now_ms, start_ms) >= int(max_seconds) * 1000:
                     return None
+
+            time.sleep_ms(poll_ms)
