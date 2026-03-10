@@ -10,16 +10,18 @@ cat <<'BANNER'
     .    '-~~~-'   '-~~~-'   '-~~~-'   '-~~~-'   .
       .  .  .   .  .  .   .  .  .   .  .  .  .
 
-      ___  o  ____    ____  _   _  ____  ____  _   _
-     / _ \   |  _ \  |  _ )| | | ||  _ \|  _ \\ \ / /
-    / /_\ \  | |_) | | |_) | |_| || | | || | | |\ V /
-   /_/   \_\ |_|__/  |____/ \___/ |_|_/_/|_|_/  \_/
+      _    _      ____            _     _
+     / \  (_)_ __| __ ) _   _  __| | __| |_   _
+    / _ \ | | '__|  _ \| | | |/ _` |/ _` | | | |
+   / ___ \| | |  | |_) | |_| | (_| | (_| | |_| |
+  /_/   \_\_|_|  |____/ \__,_|\__,_|\__,_|\__, |
+                                        |___/
 
                     ~  Know thy air  ~
 
 BANNER
 
-echo "Hey there, future air quality champion! Welcome to AirBuddy."
+echo "Hey buddy, take a deep breathe... its installation time!"
 echo
 echo "You're about to set up a real-time air quality monitor on your"
 echo "Raspberry Pi Pico or ESP32. It reads CO2, TVOC, temp & humidity"
@@ -30,7 +32,7 @@ echo "  1. check that Git is installed"
 echo "  2. download the AirBuddy code to ~/Documents/AirBuddy"
 echo "  3. hand things off to the device installer"
 echo
-echo "Estimated time: about 2-3 minutes. Let's breathe some data!"
+echo "Estimated time: about 2-3 minutes. Let's inhale some data!"
 echo
 
 # --------------------------------------------------

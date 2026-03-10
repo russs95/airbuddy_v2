@@ -5,7 +5,7 @@ set -euo pipefail
 # AirBuddy Device Installer
 # ------------------------------------------------------------
 # Uploads AirBuddy MicroPython firmware from /device onto a
-# connected Pico (RP2040) or ESP32 board using mpremote.
+# connected Pico (RP2040) or ESP/32 board using mpremote.
 #
 # Usage:
 #   ./scripts/install_airbuddy.sh

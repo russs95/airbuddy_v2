@@ -84,6 +84,11 @@ def run(
     from src.ui.waiting import WaitingScreen
     from src.app.gps_init import init_gps
 
+    try:
+        from src.app.rtc_sync import refresh_ds3231_temp as _refresh_rtc_temp
+    except Exception:
+        _refresh_rtc_temp = None
+
     if oled is None:
         from src.ui.oled import OLED
         oled = OLED()
@@ -431,6 +436,13 @@ def run(
         except Exception:
             status["gps_on"] = GPS_NONE
 
+        # --- RTC temp refresh (throttled internally to ~70s) ---
+        if _refresh_rtc_temp is not None:
+            try:
+                _refresh_rtc_temp(i2c, rtc)
+            except Exception:
+                pass
+
         # --- Telemetry start ---
         start_telemetry_if_ready(cfg)
 
@@ -445,6 +457,12 @@ def run(
                 status["wifi_ok"] = bool(wifi.is_connected())
             except Exception:
                 status["wifi_ok"] = False
+
+            if _refresh_rtc_temp is not None:
+                try:
+                    _refresh_rtc_temp(i2c, rtc)
+                except Exception:
+                    pass
 
             start_telemetry_if_ready(cfg)
             tick_telemetry(cfg)

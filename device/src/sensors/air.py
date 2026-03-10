@@ -1,25 +1,21 @@
 # src/sensors/air.py  (MicroPython / Pico W) — Pico-safe
 #
-# Patch (AHT10 + AHT21 support):
-# - Adds OPTIONAL AHT10 support (uses src.drivers.aht10.AHT10 if present)
-# - Keeps AHT21 + ENS160 path as before
+# Patched version:
+# - Adds safer AHT21 init + busy/status handling
+# - Keeps OPTIONAL AHT10 support
 # - Stores BOTH sensor readings side-by-side on AirReading:
 #     r.aht10_temp_c, r.aht10_humidity
 #     r.aht21_temp_c, r.aht21_humidity
 # - Chooses a "primary" temp/rh for ENS160 compensation + UI:
-#     Prefer AHT21 (on the ENS stack), else AHT10, else 0/0 fallback
+#     Prefer AHT21, else AHT10, else last good reading, else 0/0 fallback
 #
-# IMPORTANT NOTE ABOUT ADDRESS CONFLICTS:
-# - AHT10 and AHT21 usually both use I2C address 0x38.
-# - If you physically connect *two* 0x38 devices to the SAME I2C bus,
-#   they WILL conflict (both answer at once) and reads may be garbage.
-# - To truly compare two separate 0x38 sensors, you need:
-#     * TCA9548A mux, OR
-#     * put one sensor on a second I2C bus (different pins), OR
-#     * a sensor with a different address.
-#
-# This code supports a SECOND I2C bus for AHT10 (optional),
-# so you can compare safely once you wire it that way.
+# LOGIC PATCHES:
+# - Do NOT reject ENS160 reading just because tvoc_ppb == 0
+# - Do NOT aggressively use 0/0 when AHT read fails
+# - Use last good temp/rh if current env sensor fails
+# - Only set ENS160 environment when temp/rh are actually available
+# - Add AHT21 init + busy polling + sanity checks
+# - Fix CSV log placeholder count bug
 
 import time
 from machine import Pin, I2C
@@ -88,24 +84,85 @@ class AirReading:
 
 
 # ----------------------------
-# Minimal AHT21 driver
+# Minimal but safer AHT21 driver
 # ----------------------------
 class AHT21:
+    _CMD_INIT = b"\xBE\x08\x00"
+    _CMD_TRIGGER = b"\xAC\x33\x00"
+    _CMD_SOFTRESET = b"\xBA"
+
     def __init__(self, i2c, addr=0x38):
         self.i2c = i2c
         self.addr = addr
+        self._inited = False
+        self._init_sensor()
+
+    def _read_status(self):
+        try:
+            return self.i2c.readfrom(self.addr, 1)[0]
+        except Exception:
+            return None
+
+    def _wait_ready(self, timeout_ms=200):
+        start = time.ticks_ms()
+        while time.ticks_diff(time.ticks_ms(), start) < int(timeout_ms):
+            status = self._read_status()
+            if status is not None:
+                # bit7 busy = 1 while measuring/busy
+                if (status & 0x80) == 0:
+                    return True
+            time.sleep_ms(10)
+        return False
+
+    def _init_sensor(self):
+        # Best effort reset/init
+        try:
+            self.i2c.writeto(self.addr, self._CMD_SOFTRESET)
+            time.sleep_ms(25)
+        except Exception:
+            pass
+
+        try:
+            self.i2c.writeto(self.addr, self._CMD_INIT)
+            time.sleep_ms(10)
+        except Exception:
+            pass
+
+        self._wait_ready(200)
+        self._inited = True
 
     def read(self):
-        # Trigger
-        self.i2c.writeto(self.addr, b"\xAC\x33\x00")
-        time.sleep_ms(85)
+        if not self._inited:
+            self._init_sensor()
+
+        # Trigger measurement
+        self.i2c.writeto(self.addr, self._CMD_TRIGGER)
+        time.sleep_ms(10)  # allow AHT21 to assert busy bit before polling
+
+        # Wait until not busy
+        if not self._wait_ready(200):
+            raise OSError("AHT21 busy timeout")
 
         data = self.i2c.readfrom(self.addr, 6)
+        if data is None or len(data) != 6:
+            raise OSError("AHT21 short read")
+
+        # If still busy, reject
+        if data[0] & 0x80:
+            raise OSError("AHT21 still busy")
+
         raw_h = ((data[1] << 12) | (data[2] << 4) | (data[3] >> 4)) & 0xFFFFF
         raw_t = (((data[3] & 0x0F) << 16) | (data[4] << 8) | data[5]) & 0xFFFFF
 
         humidity = raw_h * 100.0 / 1048576.0
         temp_c = raw_t * 200.0 / 1048576.0 - 50.0
+
+        # Basic sanity checks
+        if not (-40.0 <= temp_c <= 85.0):
+            raise ValueError("AHT21 temp out of range")
+        if not (0.0 <= humidity <= 100.0):
+            raise ValueError("AHT21 humidity out of range")
+
         return temp_c, humidity
 
 
@@ -117,10 +174,12 @@ class ENS160:
     _REG_OPMODE = 0x10
     _REG_TEMP_IN = 0x13
     _REG_RH_IN = 0x15
+    _REG_DATA_STATUS = 0x20
     _REG_DATA_AQI = 0x21
     _REG_DATA_TVOC = 0x22
     _REG_DATA_ECO2 = 0x24
 
+    _OPMODE_IDLE = 0x01
     _OPMODE_STD = 0x02
 
     def __init__(self, i2c, addr=0x53):
@@ -142,6 +201,24 @@ class ENS160:
         _ = self._read(self._REG_PART_ID, 2)
         self._write8(self._REG_OPMODE, self._OPMODE_STD)
         time.sleep_ms(50)
+
+    def data_ready(self):
+        """Return True if ENS160 has new measurement data (NEWDAT bit in DATA_STATUS)."""
+        try:
+            status = self._read(self._REG_DATA_STATUS, 1)[0]
+            return bool(status & 0x02)  # bit 1 = NEWDAT
+        except Exception:
+            return False
+
+    def reset_to_std(self):
+        """Cycle through idle → standard mode to recover from a stuck/frozen state."""
+        try:
+            self._write8(self._REG_OPMODE, self._OPMODE_IDLE)
+            time.sleep_ms(20)
+            self._write8(self._REG_OPMODE, self._OPMODE_STD)
+            time.sleep_ms(50)
+        except Exception:
+            pass
 
     def set_environment(self, temp_c, rh):
         temp_k = float(temp_c) + 273.15
@@ -274,7 +351,11 @@ class AirSensor:
             self._ens = ENS160(self._i2c, addr=self._ens_addr)
 
         # AHT10 optional bus: if not provided, we will try to use the primary bus
-        if self._aht10_i2c is None and (self._aht10_i2c_id is not None or self._aht10_pin_sda is not None or self._aht10_pin_scl is not None):
+        if self._aht10_i2c is None and (
+                self._aht10_i2c_id is not None
+                or self._aht10_pin_sda is not None
+                or self._aht10_pin_scl is not None
+        ):
             # Build explicit AHT10 bus
             try:
                 bus_id = 1 if self._aht10_i2c_id is None else int(self._aht10_i2c_id)
@@ -286,13 +367,11 @@ class AirSensor:
                 self._aht10_i2c = None
 
         # Only attempt AHT10 if a dedicated bus or explicit pin config was provided.
-        # Without this guard, _init() writes CMD_SOFTRESET/CMD_INIT to address 0x38,
-        # which collides with AHT21 on the same address.
         _has_aht10_cfg = (
-            self._aht10_i2c is not None
-            or self._aht10_i2c_id is not None
-            or self._aht10_pin_sda is not None
-            or self._aht10_pin_scl is not None
+                self._aht10_i2c is not None
+                or self._aht10_i2c_id is not None
+                or self._aht10_pin_sda is not None
+                or self._aht10_pin_scl is not None
         )
         if self._aht10 is None and _has_aht10_cfg:
             try:
@@ -335,9 +414,11 @@ class AirSensor:
     # ----------------------------
     @staticmethod
     def _ens_values_look_ready(aqi, tvoc_ppb, eco2_ppm, temp_c=None):
-        if eco2_ppm == 0:
+        # Do NOT reject just because TVOC is 0.
+        # TVOC can legitimately be 0 in clean air / startup conditions.
+        if eco2_ppm <= 0:
             return False
-        if tvoc_ppb == 0:
+        if aqi is None or int(aqi) <= 0:
             return False
         if temp_c is not None and temp_c == 0:
             return False
@@ -346,13 +427,38 @@ class AirSensor:
     def _read_ens160_with_retry(self, temp_c, rh, timeout_ms=4000, step_ms=250):
         start = time.ticks_ms()
         last = None
+        stale_count = 0
 
         while time.ticks_diff(time.ticks_ms(), start) < int(timeout_ms):
+            # Always compensate — use real values when available, else safe defaults
+            comp_temp = temp_c if temp_c is not None else 25.0
+            comp_rh   = rh     if rh is not None     else 50.0
             try:
-                self._ens.set_environment(temp_c, rh)
+                self._ens.set_environment(comp_temp, comp_rh)
             except Exception:
                 pass
 
+            # Check DATA_STATUS register for fresh measurement (NEWDAT bit)
+            new_data = False
+            try:
+                new_data = self._ens.data_ready()
+            except Exception:
+                pass
+
+            if not new_data:
+                stale_count += 1
+                # After ~1 s of no new data, cycle opmode to recover a frozen sensor
+                stale_thresh = max(4, int(1000 / max(1, int(step_ms))))
+                if stale_count >= stale_thresh:
+                    try:
+                        self._ens.reset_to_std()
+                    except Exception:
+                        pass
+                    stale_count = 0
+                time.sleep_ms(int(step_ms))
+                continue
+
+            stale_count = 0
             try:
                 aqi, tvoc_ppb, eco2_ppm = self._ens.read_air_raw()
                 last = (aqi, tvoc_ppb, eco2_ppm)
@@ -372,11 +478,37 @@ class AirSensor:
     # ----------------------------
     @staticmethod
     def _temp_ok(temp_c):
-        return (-10.0 <= float(temp_c) <= 60.0)
+        return temp_c is not None and (-10.0 <= float(temp_c) <= 60.0)
 
     @staticmethod
     def _rh_ok(rh):
-        return (0.0 <= float(rh) <= 100.0)
+        return rh is not None and (0.0 <= float(rh) <= 100.0)
+
+    @staticmethod
+    def _env_values_reasonable(temp_c, rh):
+        if temp_c is None or rh is None:
+            return False
+        if not (-40.0 <= float(temp_c) <= 85.0):
+            return False
+        if not (0.0 <= float(rh) <= 100.0):
+            return False
+        return True
+
+    def _select_env_values(self, aht21_temp, aht21_rh, aht10_temp, aht10_rh):
+        # Prefer AHT21
+        if self._env_values_reasonable(aht21_temp, aht21_rh):
+            return float(aht21_temp), float(aht21_rh), "aht21"
+
+        # Then AHT10
+        if self._env_values_reasonable(aht10_temp, aht10_rh):
+            return float(aht10_temp), float(aht10_rh), "aht10"
+
+        # Then last known good
+        if self._last is not None and self._env_values_reasonable(self._last.temp_c, self._last.humidity):
+            return float(self._last.temp_c), float(self._last.humidity), "last"
+
+        # Absolute fallback only if we have nothing else
+        return 0.0, 0.0, "none"
 
     # ----------------------------
     # Core read
@@ -400,19 +532,16 @@ class AirSensor:
                 pass
 
         # Choose primary env for ENS160 + UI
-        # Prefer AHT21 if it read, else AHT10, else 0/0
-        if aht21_temp is not None and aht21_rh is not None:
-            temp_c, rh = float(aht21_temp), float(aht21_rh)
-            env_src = "aht21"
-        elif aht10_temp is not None and aht10_rh is not None:
-            temp_c, rh = float(aht10_temp), float(aht10_rh)
-            env_src = "aht10"
-        else:
-            temp_c, rh = 0.0, 0.0
-            env_src = "none"
+        temp_c, rh, env_src = self._select_env_values(
+            aht21_temp, aht21_rh, aht10_temp, aht10_rh
+        )
+
+        # If env source is "none", do not feed 0/0 into ENS compensation
+        ens_temp = temp_c if env_src != "none" else None
+        ens_rh = rh if env_src != "none" else None
 
         aqi, tvoc_ppb, eco2_ppm, ready, reason = self._read_ens160_with_retry(
-            temp_c, rh, timeout_ms=4500, step_ms=250
+            ens_temp, ens_rh, timeout_ms=4500, step_ms=250
         )
 
         rating = self._rating_from_aqi(aqi) if ready else "Not ready"
@@ -423,8 +552,8 @@ class AirSensor:
                 conf = int(calculate_co2_confidence(
                     ens_valid=bool(ready),
                     warmup_done=bool(warmup_done),
-                    temp_ok=bool(self._temp_ok(temp_c)),
-                    rh_ok=bool(self._rh_ok(rh)),
+                    temp_ok=bool(self._temp_ok(temp_c if env_src != "none" else None)),
+                    rh_ok=bool(self._rh_ok(rh if env_src != "none" else None)),
                     eco2_ppm=int(eco2_ppm),
                     last_eco2_ppm=self._last_eco2_ppm,
                     aqi=int(aqi) if aqi is not None else None,
@@ -434,8 +563,6 @@ class AirSensor:
             except Exception:
                 conf = None
 
-        # Include which env source we used in "source" if you want
-        # (keeps your existing semantics but adds detail)
         source_tag = "{}".format(source)
         if env_src != "none":
             source_tag = "{}+{}".format(source_tag, env_src)
@@ -507,7 +634,10 @@ class AirSensor:
         except Exception:
             try:
                 with open(self.log_path, "w") as f:
-                    f.write("timestamp,temp_c,humidity,eco2_ppm,tvoc_ppb,aqi,rating,source,ready,confidence,reason,aht10_temp_c,aht10_humidity,aht21_temp_c,aht21_humidity\n")
+                    f.write(
+                        "timestamp,temp_c,humidity,eco2_ppm,tvoc_ppb,aqi,rating,source,ready,confidence,reason,"
+                        "aht10_temp_c,aht10_humidity,aht21_temp_c,aht21_humidity\n"
+                    )
             except Exception:
                 pass
 
@@ -515,7 +645,7 @@ class AirSensor:
         try:
             with open(self.log_path, "a") as f:
                 f.write(
-                    "{},{:.2f},{:.2f},{},{},{},{},{},{},{},{},{},{},{}\n".format(
+                    "{},{:.2f},{:.2f},{},{},{},{},{},{},{},{},{},{},{},{}\n".format(
                         r.timestamp, r.temp_c, r.humidity,
                         r.eco2_ppm, r.tvoc_ppb, r.aqi,
                         r.rating, r.source,
@@ -567,18 +697,16 @@ class AirSensor:
                 except Exception:
                     pass
 
-            if aht21_temp is not None and aht21_rh is not None:
-                temp_c, rh = float(aht21_temp), float(aht21_rh)
-                env_src = "aht21"
-            elif aht10_temp is not None and aht10_rh is not None:
-                temp_c, rh = float(aht10_temp), float(aht10_rh)
-                env_src = "aht10"
-            else:
-                temp_c, rh = 0.0, 0.0
-                env_src = "none"
+            temp_c, rh, env_src = self._select_env_values(
+                aht21_temp, aht21_rh, aht10_temp, aht10_rh
+            )
 
+            ens_temp = temp_c if env_src != "none" else None
+            ens_rh = rh if env_src != "none" else None
+
+            # Slightly less aggressive than before
             aqi, tvoc_ppb, eco2_ppm, ready, reason = self._read_ens160_with_retry(
-                temp_c, rh, timeout_ms=1000, step_ms=200
+                ens_temp, ens_rh, timeout_ms=1800, step_ms=200
             )
             rating = self._rating_from_aqi(aqi) if ready else "Not ready"
 
@@ -589,11 +717,11 @@ class AirSensor:
                 conf = _calc(
                     ens_valid=ready,
                     warmup_done=True,
-                    temp_ok=True,
-                    rh_ok=True,
+                    temp_ok=self._temp_ok(temp_c if env_src != "none" else None),
+                    rh_ok=self._rh_ok(rh if env_src != "none" else None),
                     eco2_ppm=int(eco2_ppm),
                     last_eco2_ppm=int(last.eco2_ppm) if last else None,
-                    aqi=int(aqi),
+                    aqi=int(aqi) if aqi is not None else None,
                     last_aqi=int(last.aqi) if last else None,
                     source=source,
                 )
@@ -621,9 +749,14 @@ class AirSensor:
                 aht21_temp_c=aht21_temp,
                 aht21_humidity=aht21_rh,
             )
+
             if ready:
                 self._last = r
+                self._last_eco2_ppm = int(eco2_ppm)
+                self._last_aqi = int(aqi)
                 return r
+
             return self._last or r
+
         except Exception:
             return self._last

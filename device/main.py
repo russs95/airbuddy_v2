@@ -468,7 +468,7 @@ def step_wifi():
     """
     ESP32-safe WiFi boot:
       - gc.collect() before WiFi init to reduce fragmentation
-      - fast-fail timeout to avoid 60s boot stalls
+      - increased timeout + 1 retry to survive slow DHCP / congested APs
 
     IMPORTANT:
       - Keep WiFi alive if connect succeeds, because the next boot step
@@ -506,8 +506,8 @@ def step_wifi():
         ok, ip, status = wifi.connect(
             cfg.get("wifi_ssid", ""),
             cfg.get("wifi_password", ""),
-            timeout_s=4,
-            retry=0
+            timeout_s=8,
+            retry=1
         )
 
         wifi_boot = {"ok": bool(ok), "supported": True, "ip": ip, "status": status}
