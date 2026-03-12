@@ -19,6 +19,7 @@ class LoggingScreen:
 
         self._enabled = False
         self._post_every_s = 120
+        self._api_base = ""
         self._single_grace_ms = 350
 
     # ----------------------------
@@ -29,6 +30,7 @@ class LoggingScreen:
         cfg = load_config()
         self._enabled = bool(cfg.get("telemetry_enabled", True))
         self._post_every_s = int(cfg.get("telemetry_post_every_s", 120))
+        self._api_base = str(cfg.get("api_base", "") or "")
         return cfg
 
     def _apply_toggle(self):
@@ -61,8 +63,8 @@ class LoggingScreen:
         o.f_arvo20.write("Telemetry", 0, 5)
         self.toggle.draw(fb, on=self._enabled)
 
-        enabled_str = "True" if self._enabled else "False"
-        o.f_med.write("Enabled: " + enabled_str, 0, 28)
+        api_str = (self._api_base or "---")[:18]
+        o.f_med.write(api_str, 0, 28)
         o.f_med.write("Post: " + str(self._post_every_s) + "s", 0, 41)
 
         fb.show()

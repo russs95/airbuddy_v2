@@ -201,6 +201,18 @@ def run(
     telemetry = None
     telemetry_started = False
 
+    def _get_rtc_fresh():
+        # Force a fresh DS3231 read into rtc right before telemetry sends.
+        # _refresh_rtc_temp with force=True bypasses the 70s throttle so the
+        # payload always contains the latest chip temperature regardless of
+        # which screen is currently showing (including sleep / idle).
+        if _refresh_rtc_temp is not None:
+            try:
+                _refresh_rtc_temp(i2c, rtc, force=True)
+            except Exception:
+                pass
+        return rtc
+
     def start_telemetry_if_ready(cfg):
         nonlocal telemetry, telemetry_started
         if telemetry_started:
@@ -211,7 +223,7 @@ def run(
             from src.app.telemetry_state import TelemetryState
             telemetry = TelemetryState(
                 air_sensor=air,
-                rtc_info_getter=lambda: rtc,
+                rtc_info_getter=_get_rtc_fresh,
                 wifi_manager=wifi,
             )
             telemetry_started = True
@@ -234,7 +246,7 @@ def run(
 
         now_ms = _now_ms()
         try:
-            result = telemetry.tick(cfg, rtc_dict=rtc)
+            result = telemetry.tick(cfg)
 
             if result is True:
                 api_sending_until_ms = _ticks_add(now_ms, int(API_SENDING_HOLD_MS))

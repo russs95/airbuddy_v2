@@ -46,7 +46,7 @@ class TelemetryScheduler:
         self.wifi = wifi_manager
 
         self._client = None
-        self._next_send_ms = time.ticks_add(time.ticks_ms(), 3000)
+        self._next_send_ms = time.ticks_add(time.ticks_ms(), 30000)
         self._last_reading = None
 
         self._dbg_every_n = 1

@@ -118,9 +118,9 @@ class OnlineScreen:
             status_text = "API offline"
         o.f_med.write(status_text[:18], 0, status_y)
 
-        # API base in med font
-        api_str = (self.api_base or "")[:15]
-        o.f_med.write(api_str, 0, status_y + line_h)
+        # Device ID in med font
+        did = (self.device_id or "---")[:14]
+        o.f_med.write("ID: " + did, 0, status_y + line_h)
 
         # Masked device key in med font
         key = self.device_key or ""

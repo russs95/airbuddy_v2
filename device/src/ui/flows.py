@@ -416,14 +416,44 @@ def connectivity_carousel(
     gps_scr = get_screen("gps")
     if gps_scr and hasattr(gps_scr, "show_live"):
         try:
-            gps_scr.show_live(gps, btn)
+            a = gps_scr.show_live(gps, btn)
         except Exception:
-            wait_for_single(btn, tick_fn=tick_fn)
+            a = wait_for_single(btn, tick_fn=tick_fn)
     else:
         draw_text(oled, "GPS", y=24)
-        wait_for_single(btn, tick_fn=tick_fn)
+        a = wait_for_single(btn, tick_fn=tick_fn)
 
-    # Single click in GPS returns to waiting
+    sp = _handle_special(a)
+    if sp == "handled":
+        return
+    if sp in ("quad", "debug"):
+        return sp
+
+    if a != "single":
+        return _exit(a)
+
+    _post_screen_flush(btn, ms=120, poll_ms=poll_ms)
+
+    # ------------------------------------------------------------
+    # 5) DEVICE SCREEN
+    # ------------------------------------------------------------
+    device_scr = get_screen("device")
+    if device_scr and hasattr(device_scr, "show_live"):
+        try:
+            api_info = _fetch_device_info(cfg)
+            a = device_scr.show_live(btn=btn, api_info=api_info, tick_fn=tick_fn)
+        except Exception:
+            a = wait_for_single(btn, tick_fn=tick_fn)
+    else:
+        draw_text(oled, "DEVICE", y=24)
+        a = wait_for_single(btn, tick_fn=tick_fn)
+
+    sp = _handle_special(a)
+    if sp == "handled":
+        return
+    if sp in ("quad", "debug"):
+        return sp
+
     return _exit(None)
 
 # ============================================================

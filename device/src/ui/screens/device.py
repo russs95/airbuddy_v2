@@ -134,17 +134,15 @@ class DeviceScreen:
         try:
             cfg = load_config() or {}
             device_id = str(cfg.get("device_id", "") or "")
-            enabled = bool(cfg.get("telemetry_enabled", True))
         except Exception:
             device_id = ""
-            enabled = True
 
         ow = int(getattr(self.oled, "width", 128))
 
-        # device name top-left in arvo20 at y=0
+        # Title top-left in arvo20 at y=0
         if self.f_title:
             try:
-                self.f_title.write(device[:16], 0, 0)
+                self.f_title.write("Device", 0, 0)
             except Exception:
                 pass
 
@@ -169,10 +167,10 @@ class DeviceScreen:
             except Exception:
                 pass
 
-        # Status at y=50
+        # Device ID at y=50
         if self.f_med:
             try:
-                self.f_med.write("Status: " + ("Enabled" if enabled else "Disabled"), 0, 50)
+                self.f_med.write(("Device ID: " + (device_id or "---"))[:20], 0, 50)
             except Exception:
                 pass
 

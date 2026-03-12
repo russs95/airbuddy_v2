@@ -22,11 +22,14 @@ class TempScreen:
     REFRESH_MS = 4000
     POLL_MS = 25
 
-    def __init__(self, oled, i2c=None, status=None):
+    def __init__(self, oled, i2c=None, status=None, rtc_info=None):
         self.oled = oled
         self._i2c = i2c
         # Status dict held by reference — always reflects live main-loop state.
         self._status = status if isinstance(status, dict) else {}
+        # RTC info dict held by reference — fresh reads are written back so
+        # the telemetry scheduler always sees the latest DS3231 temperature.
+        self._rtc_info = rtc_info if isinstance(rtc_info, dict) else None
 
     # -------------------------------------------------
     # Helpers
@@ -48,6 +51,8 @@ class TempScreen:
         """
         Read a fresh temperature directly from the DS3231 chip.
         probe=False skips the bus scan on every refresh call.
+        Writes the result back into self._rtc_info["temp_c"] so the
+        telemetry scheduler always sends the latest displayed value.
         Returns float °C or None if the RTC is absent / unreadable.
         """
         if self._i2c is None:
@@ -55,7 +60,13 @@ class TempScreen:
         try:
             from src.drivers.ds3231 import DS3231
             rtc = DS3231(self._i2c, probe=False)
-            return rtc.temperature()
+            tc = rtc.temperature()
+            if tc is not None and self._rtc_info is not None:
+                try:
+                    self._rtc_info["temp_c"] = float(tc)
+                except Exception:
+                    pass
+            return tc
         except Exception:
             return None
 
