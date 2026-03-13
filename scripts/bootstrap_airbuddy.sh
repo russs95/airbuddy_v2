@@ -4,11 +4,11 @@ set -e
 
 cat <<'BANNER'
 
-        .  .  .   .  .  .   .  .  .   .  .  .
-      .  .-~~~-.   .-~~~-.   .-~~~-.   .-~~~-.  .
-     .  (       ) (       ) (       ) (       )  .
-    .    '-~~~-'   '-~~~-'   '-~~~-'   '-~~~-'   .
-      .  .  .   .  .  .   .  .  .   .  .  .  .
+        .  .  .   .  .  .   .  .  .
+      .  .-~~~-.   .-~~~-.   .-~~~-.  .
+     .  (       ) (       ) (       )  .
+    .    '-~~~-'   '-~~~-'   '-~~~-'   .
+      .  .  .   .  .  .   .  .  .  .
 
       _    _      ____            _     _
      / \  (_)_ __| __ ) _   _  __| | __| |_   _
@@ -21,19 +21,38 @@ cat <<'BANNER'
 
 BANNER
 
-echo "Hey buddy, take a deep breathe... its installation time!"
+echo "Hey buddy, take a deep breath... it's installation time!"
 echo
 echo "You're about to set up a real-time air quality monitor on your"
-echo "Raspberry Pi Pico or ESP32. It reads CO2, TVOC, temp & humidity"
-echo "and streams the data live to your Buwana dashboard."
+echo "Raspberry Pi Pico or ESP32. It reads CO2, TVOC, temperature,"
+echo "and humidity, and streams the data live to your Buwana dashboard."
 echo
 echo "This script will:"
 echo "  1. check that Git is installed"
 echo "  2. download the AirBuddy code to ~/Documents/AirBuddy"
 echo "  3. hand things off to the device installer"
 echo
-echo "Estimated time: about 2-3 minutes. Let's inhale some data!"
+echo "Estimated time: about 2-3 minutes. Let's breathe some data!"
 echo
+
+while true; do
+    read -r -p "Ready to go? y/n: " READY
+    case "${READY,,}" in
+        y|yes)
+            echo
+            break
+            ;;
+        n|no)
+            echo
+            echo "Ok, maybe some other time then! Until next time."
+            exit 0
+            ;;
+        *)
+            echo "Please answer y or n."
+            echo
+            ;;
+    esac
+done
 
 # --------------------------------------------------
 # Check Git
