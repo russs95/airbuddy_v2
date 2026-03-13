@@ -17,7 +17,7 @@ cat <<'BANNER'
   /_/   \_\_|_|  |____/ \__,_|\__,_|\__,_|\__, |
                                         |___/
 
-                    ~  Know thy air  ~
+                    ~  KNOW THY AIR  ~
 
 BANNER
 
